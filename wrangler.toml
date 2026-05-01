@@ -1,0 +1,6 @@
+name = "atmos-stream-proxy"
+main = "cloudflare_worker.js"
+compatibility_date = "2024-04-05"
+
+[observability]
+enabled = true
