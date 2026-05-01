@@ -353,7 +353,7 @@ class StreamExtractorService {
       if (response.statusCode == 200) {
         final body = response.body;
         // Basic Regex to find m3u8 or mp4
-        final regex = RegExp(r'(https?:\/\/[^\s"\'<>]+?\.(?:m3u8|mp4)[^\s"\'<>]*)');
+        final regex = RegExp(r'''(https?://[^\s"'<>]+?\.(?:m3u8|mp4)[^\s"'<>]*)''');
         final match = regex.firstMatch(body);
         if (match != null) {
           final streamUrl = match.group(1)!;
