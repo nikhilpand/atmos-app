@@ -33,10 +33,10 @@ jobs:
         run: flutter pub get
 
       - name: Build Universal APK
-        run: flutter build apk --release
+        run: flutter build apk --release --build-name=2.0.${{ github.run_number }} --build-number=${{ github.run_number }}
 
       - name: Build Split APKs (TVs, Older Devices, etc.)
-        run: flutter build apk --split-per-abi --release
+        run: flutter build apk --split-per-abi --release --build-name=2.0.${{ github.run_number }} --build-number=${{ github.run_number }}
 
       - name: Sign APKs
         run: |
@@ -57,23 +57,23 @@ jobs:
               
             # Rename the signed APK for clarity
             BASENAME=$(basename "$apk" -release.apk)
-            mv "$apk" "build/app/outputs/flutter-apk/Atmos-$BASENAME-v1.0.${{ github.run_number }}.apk"
+            mv "$apk" "build/app/outputs/flutter-apk/Atmos-$BASENAME-v2.0.${{ github.run_number }}.apk"
           done
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v1
         with:
-          tag_name: v1.0.${{ github.run_number }}
-          name: Atmos Release v1.0.${{ github.run_number }}
+          tag_name: v2.0.${{ github.run_number }}
+          name: Atmos Release v2.0.${{ github.run_number }}
           body: |
             Automated Release from push to master.
             Run Number: ${{ github.run_number }}
             
             **Included APKs:**
-            - `Atmos-app-v1.0.x.apk`: Universal APK (Works on everything, larger size)
-            - `Atmos-app-arm64-v8a-v1.0.x.apk`: Modern 64-bit Android Phones
-            - `Atmos-app-armeabi-v7a-v1.0.x.apk`: Android TVs, FireSticks, and Older Phones
-            - `Atmos-app-x86_64-v1.0.x.apk`: Android Emulators and x86 Tablets
+            - `Atmos-app-v2.0.x.apk`: Universal APK (Works on everything, larger size)
+            - `Atmos-app-arm64-v8a-v2.0.x.apk`: Modern 64-bit Android Phones
+            - `Atmos-app-armeabi-v7a-v2.0.x.apk`: Android TVs, FireSticks, and Older Phones
+            - `Atmos-app-x86_64-v2.0.x.apk`: Android Emulators and x86 Tablets
           files: build/app/outputs/flutter-apk/Atmos-*.apk
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
