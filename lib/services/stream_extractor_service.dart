@@ -192,10 +192,7 @@ class StreamExtractorService {
     required String url,
     required String providerName,
   }) async {
-    // 1. Cloudflare Worker Reverse Proxy Bypass
-    // Add your worker URL here:
-    final workerStream = await resolveViaWorker(url, providerName);
-    if (workerStream != null) return workerStream;
+    // 1. (Removed worker extraction path as it is blocked by Cloudflare)
 
     // 2. Fast Path API Resolution
     final apiStream = await resolveViaApi(url, providerName);
@@ -338,11 +335,7 @@ class StreamExtractorService {
     return null;
   }
 
-    // We rely entirely on the HeadlessInAppWebView because Cloudflare Bot Management
-    // blocks Cloudflare Workers (fetch) from accessing streaming providers.
-    // The headless webview runs on the user's IP and can solve Turnstile.
-    return null;
-  }
+
 
   /// Builds a proxied stream URL for HLS segment requests.
   /// This fixes CDN referer checks on .ts chunks by routing them

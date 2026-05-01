@@ -11,6 +11,8 @@ import '../theme/app_tokens.dart';
 import '../providers/providers.dart';
 import '../models/download_source.dart';
 import '../services/telegram_service.dart';
+import '../services/ota_update_service.dart';
+import '../widgets/update_dialog.dart';
 
 // ─── Settings Screen ──────────────────────────────────────────────────────────
 
@@ -251,9 +253,25 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           // ── About ───────────────────────────────────────────────────
           _SectionHeader('About'),
           _SettingTile(
-            icon: Icons.info_outline_rounded,
-            title: 'Version',
-            subtitle: _version.isNotEmpty ? _version : 'v2.0.0',
+            icon: Icons.system_update_rounded,
+            title: 'Check for Updates',
+            subtitle: _version.isNotEmpty ? 'Current: $_version' : 'v2.0.0',
+            onTap: () async {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('Checking for updates...')),
+              );
+              final release = await ref.read(otaUpdateProvider).checkForUpdate();
+              if (!context.mounted) return;
+              ScaffoldMessenger.of(context).hideCurrentSnackBar();
+              
+              if (release != null) {
+                UpdateDialog.show(context, release);
+              } else {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('You are on the latest version.')),
+                );
+              }
+            },
           ),
           _SettingTile(
             icon: Icons.bolt_rounded,

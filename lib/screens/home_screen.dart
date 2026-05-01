@@ -8,6 +8,8 @@ import '../providers/providers.dart';
 import '../services/tmdb_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/media_card.dart';
+import '../services/ota_update_service.dart';
+import '../widgets/update_dialog.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
   const HomeScreen({super.key});
@@ -18,6 +20,21 @@ class HomeScreen extends ConsumerStatefulWidget {
 class _HomeScreenState extends ConsumerState<HomeScreen> {
   int _heroIndex = 0;
   final ScrollController _scroll = ScrollController();
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _checkForUpdates();
+    });
+  }
+
+  Future<void> _checkForUpdates() async {
+    final release = await ref.read(otaUpdateProvider).checkForUpdate();
+    if (release != null && mounted) {
+      UpdateDialog.show(context, release);
+    }
+  }
 
   @override
   void dispose() { _scroll.dispose(); super.dispose(); }
