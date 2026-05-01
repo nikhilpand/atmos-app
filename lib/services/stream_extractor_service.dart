@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 // ─── Result model ─────────────────────────────────────────────────────────────
@@ -252,8 +253,10 @@ class StreamExtractorService {
               debugPrint(
                   '[Extractor] ✅ Found stream via $method on $providerName:\n  $streamUrl');
 
+              final proxiedUrl = buildProxiedUrl(streamUrl, url) ?? streamUrl;
+
               completer.complete(ExtractedStream(
-                url: streamUrl,
+                url: proxiedUrl,
                 headers: {
                   'Referer': url,
                   'Origin': Uri.parse(url).origin,
@@ -286,8 +289,9 @@ class StreamExtractorService {
             debugPrint(
                 '[Extractor] ✅ Intercepted via network on $providerName:\n  $reqUrl');
             if (!completer.isCompleted) {
+              final proxiedUrl = buildProxiedUrl(reqUrl, url) ?? reqUrl;
               completer.complete(ExtractedStream(
-                url: reqUrl,
+                url: proxiedUrl,
                 headers: {
                   'Referer': url,
                   'Origin': Uri.parse(url).origin,
@@ -334,44 +338,22 @@ class StreamExtractorService {
     return null;
   }
 
-  /// Try bypassing Cloudflare using our Cloudflare Worker Reverse Proxy
-  Future<ExtractedStream?> resolveViaWorker(String url, String providerName) async {
-    // Note: Replace this with your actual deployed Worker URL!
-    const String workerUrl = 'https://atmos-stream-proxy.nkp9450732628.workers.dev/';
-    
-    if (workerUrl.contains('REPLACE_WITH')) return null;
-
-    try {
-      final base64Url = base64UrlEncode(utf8.encode(url));
-      final proxyUrl = '$workerUrl?url=$base64Url';
-      
-      debugPrint('[Extractor] ── Trying Cloudflare Worker Bypass for $providerName');
-      final response = await http.get(Uri.parse(proxyUrl), headers: {
-        'User-Agent': _userAgents.first,
-      }).timeout(const Duration(seconds: 10));
-      
-      if (response.statusCode == 200) {
-        final body = response.body;
-        // Basic Regex to find m3u8 or mp4
-        final regex = RegExp(r'''(https?://[^\s"'<>]+?\.(?:m3u8|mp4)[^\s"'<>]*)''');
-        final match = regex.firstMatch(body);
-        if (match != null) {
-          final streamUrl = match.group(1)!;
-          debugPrint('[Extractor] ✅ Found stream via Worker on $providerName:\n  $streamUrl');
-          return ExtractedStream(
-            url: streamUrl,
-            headers: {
-              'Referer': url,
-              'Origin': Uri.parse(url).origin,
-            },
-            providerName: providerName,
-          );
-        }
-      }
-    } catch (e) {
-      debugPrint('[Extractor] ❌ Worker Bypass Failed: $e');
-    }
+    // We rely entirely on the HeadlessInAppWebView because Cloudflare Bot Management
+    // blocks Cloudflare Workers (fetch) from accessing streaming providers.
+    // The headless webview runs on the user's IP and can solve Turnstile.
     return null;
+  }
+
+  /// Builds a proxied stream URL for HLS segment requests.
+  /// This fixes CDN referer checks on .ts chunks by routing them
+  /// through the worker proxy.
+  String? buildProxiedUrl(String rawUrl, String referer) {
+    final workerUrl = dotenv.env['EXTRACTOR_WORKER_URL'];
+    if (workerUrl == null || workerUrl.isEmpty) return rawUrl;
+    
+    final encoded = Uri.encodeComponent(rawUrl);
+    final encodedRef = Uri.encodeComponent(referer);
+    return '$workerUrl/proxy?url=$encoded&referer=$encodedRef';
   }
 
   /// Fast path for providers with known public APIs or direct manifest endpoints
