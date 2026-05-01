@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'package:http/http.dart' as http;
 import 'package:flutter/material.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
@@ -189,11 +191,16 @@ class StreamExtractorService {
     required String url,
     required String providerName,
   }) async {
-    // 1. Fast Path API Resolution
+    // 1. Cloudflare Worker Reverse Proxy Bypass
+    // Add your worker URL here:
+    final workerStream = await resolveViaWorker(url, providerName);
+    if (workerStream != null) return workerStream;
+
+    // 2. Fast Path API Resolution
     final apiStream = await resolveViaApi(url, providerName);
     if (apiStream != null) return apiStream;
 
-    // 2. Headless WebView Extraction with Retry
+    // 3. Headless WebView Extraction with Retry
     for (int i = 0; i < 2; i++) {
       final stream = await _extractWithUa(url, providerName, _userAgents[i % _userAgents.length]);
       if (stream != null) return stream;
@@ -323,6 +330,47 @@ class StreamExtractorService {
       debugPrint('[Extractor] ── Trying ${source.$1}...');
       final result = await extract(url: source.$2, providerName: source.$1);
       if (result != null) return result;
+    }
+    return null;
+  }
+
+  /// Try bypassing Cloudflare using our Cloudflare Worker Reverse Proxy
+  Future<ExtractedStream?> resolveViaWorker(String url, String providerName) async {
+    // Note: Replace this with your actual deployed Worker URL!
+    // Example: const String workerUrl = 'https://atmos-proxy.nikhil.workers.dev/';
+    const String workerUrl = 'https://REPLACE_WITH_YOUR_WORKER_URL/';
+    
+    if (workerUrl.contains('REPLACE_WITH')) return null;
+
+    try {
+      final base64Url = base64UrlEncode(utf8.encode(url));
+      final proxyUrl = '$workerUrl?url=$base64Url';
+      
+      debugPrint('[Extractor] ── Trying Cloudflare Worker Bypass for $providerName');
+      final response = await http.get(Uri.parse(proxyUrl), headers: {
+        'User-Agent': _userAgents.first,
+      }).timeout(const Duration(seconds: 10));
+      
+      if (response.statusCode == 200) {
+        final body = response.body;
+        // Basic Regex to find m3u8 or mp4
+        final regex = RegExp(r'(https?:\/\/[^\s"\'<>]+?\.(?:m3u8|mp4)[^\s"\'<>]*)');
+        final match = regex.firstMatch(body);
+        if (match != null) {
+          final streamUrl = match.group(1)!;
+          debugPrint('[Extractor] ✅ Found stream via Worker on $providerName:\n  $streamUrl');
+          return ExtractedStream(
+            url: streamUrl,
+            headers: {
+              'Referer': url,
+              'Origin': Uri.parse(url).origin,
+            },
+            providerName: providerName,
+          );
+        }
+      }
+    } catch (e) {
+      debugPrint('[Extractor] ❌ Worker Bypass Failed: $e');
     }
     return null;
   }
