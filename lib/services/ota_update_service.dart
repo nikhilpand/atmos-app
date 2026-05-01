@@ -148,7 +148,7 @@ class OtaUpdateService {
       );
 
       // Open the downloaded APK
-      final result = await OpenFile.open(filePath);
+      final result = await OpenFile.open(filePath, type: 'application/vnd.android.package-archive');
       debugPrint('OpenFile result: ${result.message}');
     } catch (e) {
       debugPrint('Error downloading or installing update: $e');
