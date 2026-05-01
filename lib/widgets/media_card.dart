@@ -234,52 +234,83 @@ class _ShimmerBoxState extends State<_ShimmerBox>
   }
 }
 
-/// Horizontal scrollable row of [MediaCard]s with a section title.
+/// Horizontal scrollable row of [MediaCard]s with an M3 Expressive section header.
 class MediaRow extends StatelessWidget {
   final String title;
   final List<TmdbMedia> items;
   final Function(TmdbMedia) onTap;
+  final VoidCallback? onSeeAll;
 
   const MediaRow({
     super.key,
     required this.title,
     required this.items,
     required this.onTap,
+    this.onSeeAll,
   });
 
   @override
   Widget build(BuildContext context) {
     final isTv = context.isExpanded;
     final hPad = isTv ? 60.0 : 16.0;
+    final cs = Theme.of(context).colorScheme;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        // ── Animated section header ──
         Padding(
-          padding: EdgeInsets.only(left: hPad, bottom: 12),
-          child: Text(
-            title,
-            style: TextStyle(
-              fontSize: isTv ? 24 : 18,
-              fontWeight: FontWeight.w600,
-              color: Theme.of(context).colorScheme.onSurface,
-            ),
+          padding: EdgeInsets.only(left: hPad, right: hPad, bottom: 12),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  title,
+                  style: TextStyle(
+                    fontSize: isTv ? 22 : 17,
+                    fontWeight: FontWeight.w700,
+                    color: cs.onSurface,
+                  ),
+                ),
+              ),
+              if (onSeeAll != null)
+                TextButton(
+                  onPressed: onSeeAll,
+                  child: Text('See All',
+                    style: TextStyle(
+                      color: cs.primary,
+                      fontWeight: FontWeight.w600,
+                      fontSize: 13,
+                    )),
+                ),
+            ],
           ),
-        ),
+        ).animate().fadeIn(duration: 400.ms, curve: Curves.easeOut)
+          .slideX(begin: -0.05, end: 0, duration: 400.ms, curve: Curves.easeOut),
+
+        // ── Animated card list ──
         SizedBox(
-          height: isTv ? 295 : 200,
+          height: isTv ? 295 : 205,
           child: ListView.builder(
             scrollDirection: Axis.horizontal,
             padding: EdgeInsets.only(left: hPad, right: hPad),
+            physics: const BouncingScrollPhysics(),
             itemCount: items.length,
             itemBuilder: (context, i) {
+              final delay = Duration(milliseconds: 60 + i * 35);
               return Padding(
                 padding: const EdgeInsets.only(right: 12),
                 child: MediaCard(
                   media: items[i],
                   autofocus: i == 0,
                   onTap: () => onTap(items[i]),
-                ),
+                )
+                .animate(delay: delay)
+                .fadeIn(duration: 350.ms, curve: Curves.easeOut)
+                .slideY(begin: 0.12, end: 0, duration: 350.ms,
+                    curve: Curves.easeOut)
+                .scaleXY(begin: 0.92, end: 1.0, duration: 350.ms,
+                    curve: Curves.easeOut),
               );
             },
           ),

@@ -10,43 +10,32 @@ import '../services/stream_extractor_service.dart';
 // ─── Provider setup (must be called once in main) ────────────────────────────
 // MediaKit.ensureInitialized(); — called from main.dart
 
-// ─── Build URL helpers (mirrors player_screen.dart) ──────────────────────────
-
-String _buildEmbedUrl(String name, String urlTemplate, String? tvTemplate,
-    String type, String id, int season, int episode) {
-  if (type == 'movie') {
-    return urlTemplate.replaceAll('{t}', 'movie').replaceAll('{id}', id);
-  }
-  if (tvTemplate != null) {
-    return tvTemplate
-        .replaceAll('{id}', id)
-        .replaceAll('{s}', '$season')
-        .replaceAll('{e}', '$episode');
-  }
-  return urlTemplate
-      .replaceAll('{t}', 'tv')
-      .replaceAll('{id}', id)
-      .replaceAll('{s}', '$season')
-      .replaceAll('{e}', '$episode');
-}
 
 // Embed providers to try extraction on (ordered by reliability)
 List<(String, String)> _buildSourceList(
-    String type, String id, int season, int episode) {
-  const providers = [
-    ('Videasy', 'https://player.videasy.net/{t}/{id}', null),
-    ('VidSrc ICU', 'https://vidsrc.icu/embed/{t}/{id}', null),
-    ('VidFast', 'https://vidfast.pro/{t}/{id}', null),
-    ('VidLink', 'https://vidlink.pro/{t}/{id}', null),
-    ('VidSrc Dev', 'https://vidsrc.dev/embed/{t}/{id}', null),
-    ('AutoEmbed', 'https://autoembed.co/{t}/tmdb/{id}', null),
+    String type, String imdbId, String tmdbId, int season, int episode) {
+  // VidSrc.me uses imdbId query params — most reliable for episode routing
+  // Other providers use path-based routing with imdbId
+  final tvSources = [
+    ('VidSrc.me', 'https://vidsrc.me/embed/tv?imdb=$imdbId&season=$season&episode=$episode'),
+    ('Videasy', 'https://player.videasy.net/tv/$imdbId/$season/$episode'),
+    ('VidSrc ICU', 'https://vidsrc.icu/embed/tv/$imdbId/$season/$episode'),
+    ('VidSrc Dev', 'https://vidsrc.dev/embed/tv/$imdbId/$season/$episode'),
+    ('VidFast', 'https://vidfast.pro/tv/$imdbId/$season/$episode'),
+    ('VidLink', 'https://vidlink.pro/tv/$imdbId/$season/$episode'),
+    // tmdbId fallback for providers that need it
+    ('AutoEmbed', 'https://autoembed.co/tv/tmdb/$tmdbId-$season-$episode'),
   ];
-  return providers
-      .map((p) => (
-            p.$1,
-            _buildEmbedUrl(p.$1, p.$2, p.$3, type, id, season, episode),
-          ))
-      .toList();
+  final movieSources = [
+    ('VidSrc.me', 'https://vidsrc.me/embed/movie?imdb=$imdbId'),
+    ('Videasy', 'https://player.videasy.net/movie/$imdbId'),
+    ('VidSrc ICU', 'https://vidsrc.icu/embed/movie/$imdbId'),
+    ('VidSrc Dev', 'https://vidsrc.dev/embed/movie/$imdbId'),
+    ('VidFast', 'https://vidfast.pro/movie/$imdbId'),
+    ('VidLink', 'https://vidlink.pro/movie/$imdbId'),
+    ('AutoEmbed', 'https://autoembed.co/movie/tmdb/$tmdbId'),
+  ];
+  return type == 'tv' ? tvSources : movieSources;
 }
 
 // ─── Extraction state ─────────────────────────────────────────────────────────
@@ -75,16 +64,20 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
   Timer? _controlsTimer;
   bool _hasAdvanced = false;
 
-  // Getters
   String get _title => widget.args['title'] as String? ?? 'Untitled';
   String get _type => widget.args['type'] as String? ?? 'movie';
   int get _season => widget.args['season'] as int? ?? 1;
   int get _episode => widget.args['episode'] as int? ?? 1;
-  String get _id {
+
+  /// imdbId is preferred for episode routing — providers use it to locate
+  /// the exact episode. tmdbId is kept as metadata for history tracking.
+  String get _imdbId => widget.args['imdbId'] as String? ?? '';
+  String get _tmdbId {
     final tmdb = widget.args['tmdbId'];
-    if (tmdb != null && tmdb is int && tmdb > 0) return '$tmdb';
-    return widget.args['imdbId'] as String? ?? '0';
+    return (tmdb != null && tmdb is int && tmdb > 0) ? '$tmdb' : '0';
   }
+  // Legacy getter used in progress tracking
+  String get _id => _imdbId.isNotEmpty ? _imdbId : _tmdbId;
 
   @override
   void initState() {
@@ -120,8 +113,8 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
       _hasAdvanced = false;
     });
 
-    final sources = _buildSourceList(_type, _id, _season, _episode);
-    debugPrint('[NativePlayerScreen] Starting extraction for type: $_type, id: $_id, Season: $_season, Episode: $_episode');
+    final sources = _buildSourceList(_type, _imdbId, _tmdbId, _season, _episode);
+    debugPrint('[NativePlayerScreen] type=$_type imdbId=$_imdbId tmdbId=$_tmdbId S$_season E$_episode');
     debugPrint('[NativePlayerScreen] Source URLs: ${sources.map((e) => e.$2).toList()}');
 
     final stream = await _extractor.extractBestFrom(sources);

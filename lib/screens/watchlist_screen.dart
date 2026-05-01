@@ -1,9 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import 'package:flutter_animate/flutter_animate.dart';
 import '../models/media_model.dart';
 import '../providers/providers.dart';
 import '../theme/app_theme.dart';
+import '../theme/app_tokens.dart';
 import '../widgets/media_card.dart';
 
 class WatchlistScreen extends ConsumerWidget {
@@ -49,7 +51,7 @@ class WatchlistScreen extends ConsumerWidget {
                   onTap: () => context.push(
                     '/details/${media.mediaType == MediaType.movie ? 'movie' : 'tv'}/${media.id}',
                   ),
-                );
+                ).animate().fadeIn(duration: 400.ms, delay: (i * 30).ms, curve: AppMotion.emphasizedDecelerate).scaleXY(begin: 0.9, end: 1, duration: 400.ms, delay: (i * 30).ms, curve: AppMotion.emphasizedCurve);
               },
             ),
     );
@@ -109,7 +111,7 @@ class _Empty extends StatelessWidget {
                   height: 1.5,
                 ),
           ),
-        ],
+        ].animate(interval: 50.ms).fadeIn(duration: 400.ms, curve: AppMotion.emphasizedDecelerate).slideY(begin: 0.1, end: 0, duration: 400.ms, curve: AppMotion.emphasizedCurve),
       ),
     );
   }

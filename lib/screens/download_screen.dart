@@ -135,7 +135,7 @@ class _TaskList extends StatelessWidget {
           children: [
             Icon(
               showProgress ? Icons.downloading_rounded : Icons.download_done_rounded,
-              size: 64, color: cs.onSurfaceVariant.withOpacity(0.3),
+              size: 64, color: cs.onSurfaceVariant.withAlpha(76),
             ),
             const SizedBox(height: AppSpacing.md),
             Text(
@@ -215,12 +215,12 @@ class _DownloadCard extends StatelessWidget {
           borderRadius: AppRadius.lgAll,
           border: Border.all(
             color: task.status == DownloadStatus.downloading
-                ? cs.primary.withOpacity(0.3)
+                ? cs.primary.withAlpha(76)
                 : task.status == DownloadStatus.paused
-                    ? Colors.orange.withOpacity(0.3)
+                    ? Colors.orange.withAlpha(76)
                     : task.status == DownloadStatus.failed
-                        ? cs.error.withOpacity(0.3)
-                        : cs.outlineVariant.withOpacity(0.2),
+                        ? cs.error.withAlpha(76)
+                        : cs.outlineVariant.withAlpha(51),
           ),
         ),
         child: Column(
@@ -388,19 +388,19 @@ class _ActionButton extends StatelessWidget {
   void _confirmDelete(BuildContext context, ColorScheme cs) {
     showDialog<bool>(
       context: context,
-      builder: (_) => AlertDialog(
+      builder: (dialogContext) => AlertDialog(
         backgroundColor: cs.surfaceContainerHigh,
         title: Text('Remove Download', style: TextStyle(color: cs.onSurface)),
         content: Text('Remove "${task.displayTitle}"?',
             style: TextStyle(color: cs.onSurfaceVariant)),
         actions: [
           TextButton(
-            onPressed: () => Navigator.pop(context),
+            onPressed: () => Navigator.pop(dialogContext),
             child: Text('Cancel', style: TextStyle(color: cs.onSurfaceVariant)),
           ),
           TextButton(
             onPressed: () {
-              Navigator.pop(context);
+              Navigator.pop(dialogContext);
               service.deleteTask(task.id);
             },
             child: Text('Remove', style: TextStyle(color: cs.error)),
@@ -544,7 +544,7 @@ class _MetaChip extends StatelessWidget {
       decoration: BoxDecoration(
         color: cs.secondaryContainer,
         borderRadius: AppRadius.smAll,
-        border: Border.all(color: cs.secondaryContainer.withOpacity(0.5)),
+        border: Border.all(color: cs.secondaryContainer.withAlpha(127)),
       ),
       child: Row(mainAxisSize: MainAxisSize.min, children: [
         Icon(icon, size: 11, color: cs.onSecondaryContainer),
@@ -665,10 +665,12 @@ class QualityPickerSheet extends StatelessWidget {
             ]),
           )
         else
-          ...options.map((q) => _QualityTile(option: q, onTap: () {
+          ...options.asMap().entries.map((e) => _QualityTile(option: e.value, onTap: () {
             Navigator.pop(context);
-            onSelect(q);
-          })),
+            onSelect(e.value);
+          }).animate(delay: (e.key * 30).ms)
+            .fadeIn(duration: 400.ms, curve: AppMotion.emphasizedDecelerate)
+            .slideY(begin: 0.1, end: 0, duration: 400.ms, curve: AppMotion.emphasizedCurve)),
         const SizedBox(height: AppSpacing.sm),
       ]),
     );
@@ -692,9 +694,9 @@ class _QualityTile extends StatelessWidget {
       leading: Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
         decoration: BoxDecoration(
-          color: qualityColor.withOpacity(0.15),
+          color: qualityColor.withAlpha(38),
           borderRadius: AppRadius.smAll,
-          border: Border.all(color: qualityColor.withOpacity(0.4)),
+          border: Border.all(color: qualityColor.withAlpha(102)),
         ),
         child: Text(
           option.quality.split('.').first.toUpperCase(),
@@ -709,13 +711,13 @@ class _QualityTile extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
           decoration: BoxDecoration(
             color: isTelegram
-                ? const Color(0xFF2AABEE).withOpacity(0.15)
-                : Colors.blue.withOpacity(0.12),
+                ? const Color(0xFF2AABEE).withAlpha(38)
+                : Colors.blue.withAlpha(30),
             borderRadius: AppRadius.xsAll,
             border: Border.all(
               color: isTelegram
-                  ? const Color(0xFF2AABEE).withOpacity(0.4)
-                  : Colors.blue.withOpacity(0.3),
+                  ? const Color(0xFF2AABEE).withAlpha(102)
+                  : Colors.blue.withAlpha(76),
             ),
           ),
           child: Row(mainAxisSize: MainAxisSize.min, children: [

@@ -330,11 +330,11 @@ class _SectionLabel extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 20),
       child: Row(children: [
-        Icon(icon, size: 13, color: Theme.of(context).colorScheme.onSurfaceVariant.withOpacity(0.7)),
+        Icon(icon, size: 13, color: Theme.of(context).colorScheme.onSurfaceVariant),
         const SizedBox(width: 6),
         Text(label,
             style: TextStyle(
-                color: Theme.of(context).colorScheme.onSurfaceVariant.withOpacity(0.7),
+                color: Theme.of(context).colorScheme.onSurfaceVariant,
                 fontSize: 11,
                 fontWeight: FontWeight.w700,
                 letterSpacing: 0.8)),
@@ -344,7 +344,7 @@ class _SectionLabel extends StatelessWidget {
             padding:
                 const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
             decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.15),
+              color: Theme.of(context).colorScheme.primary.withAlpha(38),
               borderRadius: BorderRadius.circular(6),
             ),
             child: Text(selected,
@@ -371,34 +371,35 @@ class _QualityChips extends StatelessWidget {
       child: ListView(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 20),
+        physics: const BouncingScrollPhysics(),
         children: QualityFilter.values.map((opt) {
           final isSelected = opt == selected;
           final color = _color(context, opt);
           return GestureDetector(
             onTap: () => onSelect(opt),
             child: AnimatedContainer(
-              duration: const Duration(milliseconds: 180),
+              duration: const Duration(milliseconds: 250),
+              curve: Curves.easeOutCubic,
               margin: const EdgeInsets.only(right: 8),
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               decoration: BoxDecoration(
                 gradient: isSelected
                     ? LinearGradient(colors: [
-                        color.withValues(alpha: 0.9),
-                        color.withValues(alpha: 0.55)
+                        color,
+                        color.withAlpha(140)
                       ])
                     : null,
-                color: isSelected ? null : Color(0xFF1C1C2E),
+                color: isSelected ? null : Theme.of(context).colorScheme.surfaceContainerHigh,
                 borderRadius: BorderRadius.circular(20),
                 border: Border.all(
-                  color: isSelected ? color : Colors.white12,
+                  color: isSelected ? color : Theme.of(context).colorScheme.outlineVariant,
                 ),
               ),
               child: Text(
                 opt.label,
                 style: TextStyle(
-                  color: isSelected ? Colors.white : Theme.of(context).colorScheme.onSurfaceVariant.withOpacity(0.7),
-                  fontWeight:
-                      isSelected ? FontWeight.w700 : FontWeight.w500,
+                  color: isSelected ? Theme.of(context).colorScheme.onPrimary : Theme.of(context).colorScheme.onSurfaceVariant,
+                  fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
                   fontSize: 13,
                 ),
               ),
@@ -414,7 +415,7 @@ class _QualityChips extends StatelessWidget {
         QualityFilter.q1080 => Colors.blue,
         QualityFilter.q720 => Colors.green,
         QualityFilter.q480 => Colors.orange,
-        QualityFilter.any => Theme.of(context).colorScheme.onSurfaceVariant.withOpacity(0.7),
+        QualityFilter.any => Theme.of(context).colorScheme.primary,
       };
 }
 
@@ -439,29 +440,29 @@ class _LanguageGrid extends StatelessWidget {
           return GestureDetector(
             onTap: () => onSelect(opt),
             child: AnimatedContainer(
-              duration: const Duration(milliseconds: 180),
+              duration: const Duration(milliseconds: 250),
+              curve: Curves.easeOutCubic,
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
               decoration: BoxDecoration(
                 color: isSelected
-                    ? color.withValues(alpha: 0.18)
-                    : Color(0xFF1C1C2E),
+                    ? color.withAlpha(45)
+                    : Theme.of(context).colorScheme.surfaceContainerHigh,
                 borderRadius: BorderRadius.circular(10),
                 border: Border.all(
                   color: isSelected
-                      ? color.withValues(alpha: 0.75)
-                      : Colors.white12,
+                      ? color.withAlpha(190)
+                      : Theme.of(context).colorScheme.outlineVariant,
                 ),
               ),
               child: Row(mainAxisSize: MainAxisSize.min, children: [
-                Text(opt.flag, style: TextStyle(fontSize: 13)),
+                Text(opt.flag, style: const TextStyle(fontSize: 13)),
                 const SizedBox(width: 6),
                 Text(
                   opt.label,
                   style: TextStyle(
-                    color: isSelected ? color : Theme.of(context).colorScheme.onSurfaceVariant.withOpacity(0.7),
+                    color: isSelected ? color : Theme.of(context).colorScheme.onSurfaceVariant,
                     fontSize: 12,
-                    fontWeight:
-                        isSelected ? FontWeight.w700 : FontWeight.w500,
+                    fontWeight: isSelected ? FontWeight.w700 : FontWeight.w500,
                   ),
                 ),
               ]),
@@ -473,16 +474,16 @@ class _LanguageGrid extends StatelessWidget {
   }
 
   Color _color(BuildContext context, LanguageFilter l) => switch (l) {
-        LanguageFilter.any      => Theme.of(context).colorScheme.onSurfaceVariant.withOpacity(0.7),
+        LanguageFilter.any      => Theme.of(context).colorScheme.primary,
         LanguageFilter.original => Colors.amber,
         LanguageFilter.dual     => Colors.teal,
         LanguageFilter.english  => Colors.blue,
-        LanguageFilter.hindi    => Color(0xFFFF9933),
+        LanguageFilter.hindi    => const Color(0xFFFF9933),
         LanguageFilter.tamil    => Colors.red,
         LanguageFilter.telugu   => Colors.deepPurple,
         LanguageFilter.malayalam => Colors.green,
         LanguageFilter.kannada  => Colors.deepOrange,
         LanguageFilter.bengali  => Colors.cyan,
-        LanguageFilter.punjabi  => Color(0xFF00B67A),
+        LanguageFilter.punjabi  => const Color(0xFF00B67A),
       };
 }

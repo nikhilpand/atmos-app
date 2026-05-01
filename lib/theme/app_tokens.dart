@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 
 // ─── Spacing Scale ─────────────────────────────────────────────────────────────
-// Use AppSpacing.* everywhere instead of hardcoded EdgeInsets numbers.
 abstract final class AppSpacing {
   static const double xs  = 4;
   static const double sm  = 8;
@@ -13,11 +12,12 @@ abstract final class AppSpacing {
 
 // ─── Border Radius Scale ──────────────────────────────────────────────────────
 abstract final class AppRadius {
-  static const double xs  = 4;
-  static const double sm  = 8;
-  static const double md  = 12;
-  static const double lg  = 16;
-  static const double xl  = 24;
+  static const double xs   = 4;
+  static const double sm   = 8;
+  static const double md   = 12;
+  static const double lg   = 16;
+  static const double xl   = 24;
+  static const double xxl  = 32;
   static const double full = 999;
 
   static const BorderRadius xsAll  = BorderRadius.all(Radius.circular(xs));
@@ -25,15 +25,36 @@ abstract final class AppRadius {
   static const BorderRadius mdAll  = BorderRadius.all(Radius.circular(md));
   static const BorderRadius lgAll  = BorderRadius.all(Radius.circular(lg));
   static const BorderRadius xlAll  = BorderRadius.all(Radius.circular(xl));
+  static const BorderRadius xxlAll = BorderRadius.all(Radius.circular(xxl));
   static const BorderRadius topLg  = BorderRadius.vertical(top: Radius.circular(lg));
   static const BorderRadius topXl  = BorderRadius.vertical(top: Radius.circular(xl));
+  static const BorderRadius topXxl = BorderRadius.vertical(top: Radius.circular(xxl));
+}
+
+// ─── M3 Expressive Motion ─────────────────────────────────────────────────────
+// Based on Material Design 3 motion tokens (spring-based easing)
+abstract final class AppMotion {
+  // Durations
+  static const Duration extraFast   = Duration(milliseconds: 100);
+  static const Duration fast        = Duration(milliseconds: 200);
+  static const Duration standard    = Duration(milliseconds: 300);
+  static const Duration emphasized  = Duration(milliseconds: 400);
+  static const Duration slow        = Duration(milliseconds: 500);
+  static const Duration extraSlow   = Duration(milliseconds: 700);
+
+  // M3 Expressive easing curves (spring-like feel)
+  static const Curve emphasizedDecelerate = Cubic(0.05, 0.7, 0.1, 1.0);
+  static const Curve emphasizedAccelerate = Cubic(0.3, 0.0, 0.8, 0.15);
+  static const Curve emphasizedCurve      = Cubic(0.2, 0.0, 0.0, 1.0);
+  static const Curve standardCurve        = Cubic(0.2, 0.0, 0.0, 1.0);
+  static const Curve linearCurve          = Curves.linear;
+
+  // Stagger delay for list items
+  static Duration stagger(int index, {int ms = 40}) =>
+      Duration(milliseconds: index * ms);
 }
 
 // ─── Breakpoints ──────────────────────────────────────────────────────────────
-// compact  < 600  → phone (portrait)
-// medium   < 840  → phone (landscape), small tablet
-// expanded < 1200 → tablet, TV (standard)
-// large    ≥ 1200 → TV, large tablet
 abstract final class AppBreakpoints {
   static const double compact  = 600;
   static const double medium   = 840;
@@ -42,21 +63,19 @@ abstract final class AppBreakpoints {
 
 // ─── Responsive helpers ───────────────────────────────────────────────────────
 extension ResponsiveContext on BuildContext {
-  double get screenWidth => MediaQuery.sizeOf(this).width;
+  double get screenWidth  => MediaQuery.sizeOf(this).width;
   double get screenHeight => MediaQuery.sizeOf(this).height;
 
   bool get isCompact  => screenWidth < AppBreakpoints.compact;
   bool get isMedium   => screenWidth >= AppBreakpoints.compact && screenWidth < AppBreakpoints.expanded;
   bool get isExpanded => screenWidth >= AppBreakpoints.expanded;
 
-  /// Pick a value based on the current breakpoint.
   T responsive<T>({required T compact, T? medium, T? expanded}) {
     if (isExpanded) return expanded ?? medium ?? compact;
     if (isMedium)   return medium ?? compact;
     return compact;
   }
 
-  /// Horizontal page padding — grows on wider screens.
   EdgeInsets get pagePadding => EdgeInsets.symmetric(
     horizontal: responsive(
       compact: AppSpacing.md,
@@ -66,10 +85,7 @@ extension ResponsiveContext on BuildContext {
     vertical: AppSpacing.md,
   );
 
-  /// Grid column count for media cards.
   int get mediaGridColumns => responsive(compact: 3, medium: 4, expanded: 6);
-
-  /// Whether a side navigation rail should be shown.
   bool get showNavRail => !isCompact;
 }
 

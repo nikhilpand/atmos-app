@@ -251,6 +251,17 @@ class AtmosTheme {
       splashColor: scheme.primary.withAlpha(26),
       highlightColor: scheme.primary.withAlpha(20),
       focusColor: scheme.primary.withAlpha(38),
+      splashFactory: InkSparkle.splashFactory,
+
+      // M3 Expressive page transitions
+      pageTransitionsTheme: const PageTransitionsTheme(
+        builders: {
+          TargetPlatform.android: ZoomPageTransitionsBuilder(
+            allowEnterRouteSnapshotting: false,
+          ),
+          TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
+        },
+      ),
     );
   }
 

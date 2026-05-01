@@ -5,7 +5,9 @@ import 'package:go_router/go_router.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:flutter_animate/flutter_animate.dart';
 import '../theme/app_theme.dart';
+import '../theme/app_tokens.dart';
 import '../providers/providers.dart';
 import '../models/download_source.dart';
 import '../services/telegram_service.dart';
@@ -260,7 +262,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
 
           const SizedBox(height: AppSpacing.xl),
-        ],
+        ].animate(interval: 20.ms).fadeIn(duration: 400.ms, curve: AppMotion.emphasizedDecelerate).slideY(begin: 0.1, end: 0, duration: 400.ms, curve: AppMotion.emphasizedCurve),
       ),
     );
   }

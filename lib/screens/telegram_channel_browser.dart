@@ -5,6 +5,7 @@ import '../models/telegram_search_result.dart';
 import '../models/download_model.dart';
 import '../providers/providers.dart';
 import '../theme/app_theme.dart';
+import '../theme/app_tokens.dart';
 
 // ─── Telegram Channel Browser ─────────────────────────────────────────────────
 //
@@ -289,8 +290,9 @@ class _ResultsGrid extends ConsumerWidget {
               onPressed: () => _startDownload(ctx, ref, r),
             ),
           ),
-        ).animate(delay: Duration(milliseconds: i * 40))
-          .fadeIn(duration: 300.ms).slideY(begin: 0.05, end: 0);
+        ).animate(delay: (i * 30).ms)
+          .fadeIn(duration: 400.ms, curve: AppMotion.emphasizedDecelerate)
+          .slideY(begin: 0.1, end: 0, duration: 400.ms, curve: AppMotion.emphasizedCurve);
       },
     );
   }

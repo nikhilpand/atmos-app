@@ -228,9 +228,9 @@ class _MobileLayout extends StatelessWidget {
         Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Poster
+            // Poster with slide-in
             ClipRRect(
-              borderRadius: BorderRadius.circular(12),
+              borderRadius: BorderRadius.circular(16),
               child: CachedNetworkImage(
                 imageUrl: details.posterUrl,
                 width: 120,
@@ -238,7 +238,10 @@ class _MobileLayout extends StatelessWidget {
                 fit: BoxFit.cover,
                 memCacheWidth: 240,
               ),
-            ),
+            ).animate()
+              .fadeIn(duration: 400.ms, curve: Curves.easeOut)
+              .slideX(begin: -0.15, end: 0, duration: 450.ms,
+                  curve: const Cubic(0.05, 0.7, 0.1, 1.0)),
             const SizedBox(width: 16),
             Expanded(
               child: _MediaInfo(details: details),
@@ -246,12 +249,20 @@ class _MobileLayout extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 20),
-        _PlayButton(details: details),
+        _PlayButton(details: details)
+          .animate(delay: 150.ms)
+          .fadeIn(duration: 350.ms)
+          .slideY(begin: 0.1, end: 0, duration: 350.ms,
+              curve: Curves.easeOut),
         const SizedBox(height: 20),
-        _Overview(details: details),
+        _Overview(details: details)
+          .animate(delay: 200.ms)
+          .fadeIn(duration: 400.ms),
         if (details.cast.isNotEmpty) ...[
           const SizedBox(height: 20),
-          _CastRow(cast: details.cast),
+          _CastRow(cast: details.cast)
+            .animate(delay: 250.ms)
+            .fadeIn(duration: 400.ms),
         ],
       ],
     );
@@ -279,7 +290,10 @@ class _TvLayout extends StatelessWidget {
             fit: BoxFit.cover,
             memCacheWidth: 440,
           ),
-        ),
+        ).animate()
+          .fadeIn(duration: 400.ms, curve: Curves.easeOut)
+          .slideX(begin: -0.15, end: 0, duration: 450.ms,
+              curve: const Cubic(0.05, 0.7, 0.1, 1.0)),
         const SizedBox(width: 40),
         // Right: Info + Play
         Expanded(
@@ -288,12 +302,20 @@ class _TvLayout extends StatelessWidget {
             children: [
               _MediaInfo(details: details),
               const SizedBox(height: 24),
-              _PlayButton(details: details),
+              _PlayButton(details: details)
+                .animate(delay: 150.ms)
+                .fadeIn(duration: 350.ms)
+                .slideY(begin: 0.1, end: 0, duration: 350.ms,
+                    curve: Curves.easeOut),
               const SizedBox(height: 24),
-              _Overview(details: details),
+              _Overview(details: details)
+                .animate(delay: 200.ms)
+                .fadeIn(duration: 400.ms),
               if (details.cast.isNotEmpty) ...[
                 const SizedBox(height: 24),
-                _CastRow(cast: details.cast),
+                _CastRow(cast: details.cast)
+                  .animate(delay: 250.ms)
+                  .fadeIn(duration: 400.ms),
               ],
             ],
           ),
@@ -832,8 +854,10 @@ class _EpisodesSection extends ConsumerWidget {
                 return EpisodeTile(
                   episode: ep,
                   watchHistory: history,
-                  onTap: () {
-                    context.push('/player', extra: {
+                  onTap: () async {
+                    final route = await _PlayerModeSheet.show(context);
+                    if (!context.mounted || route == null) return;
+                    context.push(route, extra: {
                       'imdbId': details.imdbId ?? '',
                       'tmdbId': details.id,
                       'title': details.title,

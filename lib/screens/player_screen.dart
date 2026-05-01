@@ -14,22 +14,29 @@ class _P {
   final String name, url;
   final String? tv;
   final bool dash;
-  const _P(this.name, this.url, {this.tv, this.dash = false});
+  // Some providers like AutoEmbed require tmdbId specifically
+  final bool requiresTmdb;
+  const _P(this.name, this.url, {this.tv, this.dash = false, this.requiresTmdb = false});
 }
 
-// ─── Verified providers from jio-to-drive (2026-04-25) ────────────────────────
+// ─── Verified providers — ordered by reliability (2025-05) ────────────────────
+// {id} = imdbId for TV (more reliable episode routing), tmdbId for movies
+// {t}  = "movie" | "tv"
+// {s},{e} = season, episode numbers
 
 const _provs = [
-  _P('Videasy', 'https://player.videasy.net/{t}/{id}'),
+  _P('VidSrc.me',  'https://vidsrc.me/embed/{t}?imdb={id}',
+      tv: 'https://vidsrc.me/embed/tv?imdb={id}&season={s}&episode={e}'),
+  _P('Videasy',    'https://player.videasy.net/{t}/{id}'),
   _P('VidSrc ICU', 'https://vidsrc.icu/embed/{t}/{id}'),
-  _P('VidLink', 'https://vidlink.pro/{t}/{id}'),
-  _P('2Embed', 'https://www.2embed.cc/embed/{id}',
+  _P('VidLink',    'https://vidlink.pro/{t}/{id}'),
+  _P('2Embed',     'https://www.2embed.cc/embed/{id}',
       tv: 'https://www.2embed.cc/embedtv/{id}?s={s}&e={e}'),
   _P('VidSrc Dev', 'https://vidsrc.dev/embed/{t}/{id}'),
-  _P('NonTongo', 'https://nontongo.win/embed/{t}/{id}'),
-  _P('VidFast', 'https://vidfast.pro/{t}/{id}'),
-  _P('AutoEmbed', 'https://autoembed.co/{t}/tmdb/{id}', dash: true),
-  _P('MoviesAPI', 'https://moviesapi.club/{t}/{id}', dash: true),
+  _P('NonTongo',   'https://nontongo.win/embed/{t}/{id}'),
+  _P('VidFast',    'https://vidfast.pro/{t}/{id}'),
+  _P('AutoEmbed',  'https://autoembed.co/{t}/tmdb/{tmdbId}', dash: true),
+  _P('MoviesAPI',  'https://moviesapi.club/{t}/{id}', dash: true),
 ];
 
 // ─── Ad domain blocklist ──────────────────────────────────────────────────────
@@ -121,16 +128,24 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
   bool _hasAdvanced = false;
 
-  // Args — tmdbId is primary, imdbId is fallback
+  // Args — imdbId is primary for episode routing (providers use it for S/E matching)
+  //         tmdbId is kept for TMDB-specific providers and history tracking
   String get _title => widget.args['title'] as String? ?? 'Untitled';
   String get _type => widget.args['type'] as String? ?? 'movie';
   int get _season => widget.args['season'] as int? ?? 1;
   int get _episode => widget.args['episode'] as int? ?? 1;
   String? get _episodeName => widget.args['episodeName'] as String?;
+  int get _tmdbId => widget.args['tmdbId'] as int? ?? 0;
+
+  /// For TV: always use imdbId — it directly encodes episode identity.
+  /// For movies: prefer imdbId too; fall back to tmdbId.
   String get _id {
+    final imdb = widget.args['imdbId'] as String? ?? '';
+    if (imdb.isNotEmpty && imdb.startsWith('tt')) return imdb;
+    // Fallback to tmdbId only when no imdbId available
     final tmdb = widget.args['tmdbId'];
     if (tmdb != null && tmdb is int && tmdb > 0) return '$tmdb';
-    return widget.args['imdbId'] as String? ?? '0';
+    return '0';
   }
 
   @override
@@ -155,14 +170,28 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   // ── URL builder ──
 
   String _buildUrl(_P p) {
+    // Providers that explicitly need tmdbId (flagged via requiresTmdb)
+    final id = p.requiresTmdb ? '$_tmdbId' : _id;
+    // Also handle {tmdbId} template token for AutoEmbed etc.
+    final tmdbToken = '$_tmdbId';
+
     if (_type == 'movie') {
-      return p.url.replaceAll('{t}', 'movie').replaceAll('{id}', _id);
+      return p.url
+          .replaceAll('{t}', 'movie')
+          .replaceAll('{id}', id)
+          .replaceAll('{tmdbId}', tmdbToken);
     }
     if (p.tv != null) {
-      return p.tv!.replaceAll('{id}', _id)
-          .replaceAll('{s}', '$_season').replaceAll('{e}', '$_episode');
+      return p.tv!
+          .replaceAll('{id}', id)
+          .replaceAll('{tmdbId}', tmdbToken)
+          .replaceAll('{s}', '$_season')
+          .replaceAll('{e}', '$_episode');
     }
-    var u = p.url.replaceAll('{t}', 'tv').replaceAll('{id}', _id);
+    var u = p.url
+        .replaceAll('{t}', 'tv')
+        .replaceAll('{id}', id)
+        .replaceAll('{tmdbId}', tmdbToken);
     u += p.dash ? '-$_season-$_episode' : '/$_season/$_episode';
     return u;
   }
