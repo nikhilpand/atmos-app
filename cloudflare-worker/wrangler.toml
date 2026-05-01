@@ -1,0 +1,4 @@
+name = "atmos-extractor"
+main = "worker.js"
+compatibility_date = "2024-04-29"
+workers_dev = true
