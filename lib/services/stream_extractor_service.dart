@@ -337,7 +337,7 @@ class StreamExtractorService {
   /// Try bypassing Cloudflare using our Cloudflare Worker Reverse Proxy
   Future<ExtractedStream?> resolveViaWorker(String url, String providerName) async {
     // Note: Replace this with your actual deployed Worker URL!
-    const String workerUrl = 'https://atmos-proxy.nkp9450732628.workers.dev/';
+    const String workerUrl = 'https://atmos-stream-proxy.nkp9450732628.workers.dev/';
     
     if (workerUrl.contains('REPLACE_WITH')) return null;
 
