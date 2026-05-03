@@ -16,11 +16,15 @@ import { parseFilename, normalize, parseTelegramHTML } from './parser.js';
 // ── Seed channels — verified active public channels ─────────────────────────
 
 const SEED_CHANNELS = [
-  // ── Verified active via t.me/s/ probing (May 2026) ──────────────────────
-  // Movies (mixed content, high volume)
+  // Movies & Series (mixed content, high volume)
   { username: 'Movie_World_Official', category: 'movies' },
   { username: 'TeleFilm', category: 'movies' },
   { username: 'Movies4K', category: 'movies' },
+  { username: 'SeriesMoviesSearch', category: 'movies' },
+  { username: 'CinemaHub_Movies_Series', category: 'movies' },
+  { username: 'Hollywood_Movies_Hindi_Dubbed_0', category: 'movies' },
+  { username: 'Netflix_Movies_Series_HQ', category: 'movies' },
+  { username: 'Anime_Library_Updates', category: 'anime' },
 ];
 
 const USER_AGENT =

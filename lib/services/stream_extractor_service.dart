@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:flutter/material.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
 // ─── Result model ─────────────────────────────────────────────────────────────
@@ -337,7 +338,7 @@ class StreamExtractorService {
   /// Try bypassing Cloudflare using our Cloudflare Worker Reverse Proxy
   Future<ExtractedStream?> resolveViaWorker(String url, String providerName) async {
     // Note: Replace this with your actual deployed Worker URL!
-    const String workerUrl = 'https://atmos-stream-proxy.nkp9450732628.workers.dev/';
+    final String workerUrl = dotenv.env['EXTRACTOR_WORKER_URL'] ?? 'https://atmos-extractor.nkp9450732628.workers.dev/';
     
     if (workerUrl.contains('REPLACE_WITH')) return null;
 
