@@ -109,6 +109,7 @@ async function queryInlineBot(client, botUsername, query) {
         audio: parsed.audio || (fullText.includes('Dual') ? 'Dual' : ''),
         isSeasonPack: parsed.isSeasonPack || /complete|pack|all.ep/i.test(fullText),
         source: `@${botUsername}`,
+        searchQuery: query,  // Preserve so --get can re-query
       });
     }
 
@@ -602,7 +603,7 @@ async function main() {
           const bot = await client.getEntity(r.botUsername);
           const inlineResult = await client.invoke(new Api.messages.GetInlineBotResults({
             bot, peer: new Api.InputPeerSelf(),
-            query: r.fileName || r.description || '',
+            query: r.searchQuery || r.fileName || r.description || '',
             offset: '',
           }));
 
@@ -632,14 +633,27 @@ async function main() {
 
       console.log(`\n📥 Sending: ${r.fileName?.substring(0, 60) || r.description?.substring(0, 60)}`);
 
-      if (r.inlineResultId && r.botUsername) {
+      if (r.botUsername) {
         const bot = await client.getEntity(r.botUsername);
         const inlineResult = await client.invoke(new Api.messages.GetInlineBotResults({
           bot, peer: new Api.InputPeerSelf(),
-          query: r.fileName || r.description || '',
+          query: r.searchQuery || r.fileName || r.description || '',
           offset: '',
         }));
-        const match = inlineResult.results?.find(ir => ir.id === r.inlineResultId);
+
+        // Match by ID first, then by description fuzzy match
+        let match = inlineResult.results?.find(ir => ir.id === r.inlineResultId);
+        if (!match && r.description) {
+          const targetDesc = normalize(r.description).substring(0, 30);
+          match = inlineResult.results?.find(ir =>
+            normalize(ir.description || '').includes(targetDesc)
+          );
+        }
+        if (!match && inlineResult.results?.length > 0) {
+          // Last resort: just send the first result
+          match = inlineResult.results[0];
+        }
+
         if (match) {
           await client.invoke(new Api.messages.SendInlineBotResult({
             peer: new Api.InputPeerSelf(),
@@ -647,10 +661,14 @@ async function main() {
             id: match.id,
             randomId: BigInt(Math.floor(Math.random() * 1e18)),
           }));
-          console.log('✅ Sent to Saved Messages\n');
+          console.log('✅ Sent to Saved Messages — open Telegram to download\n');
+        } else {
+          console.log('❌ Could not find matching file from bot\n');
         }
       } else if (r.link) {
         console.log(`📎 Direct link: ${r.link}\n`);
+      } else {
+        console.log('❌ No downloadable link for this result\n');
       }
     }
 
