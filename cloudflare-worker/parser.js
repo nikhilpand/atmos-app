@@ -21,11 +21,11 @@ const EPISODE_PATTERNS = [
   // 1x01, 01x01
   { re: /\b(\d{1,2})[xX](\d{2,3})\b/ },
   // Season 1 Episode 3
-  { re: /(?:Season|SEASON)\s*(\d{1,2})\s*(?:Episode|EPISODE|Ep\.?)\s*(\d{1,3})/i },
+  { re: /(?:Season|SEASON)[\s._-]*(\d{1,2})[\s._-]*(?:Episode|EPISODE|Ep\.?)[\s._-]*(\d{1,3})/i },
   // EP.1, Ep01, EP01
-  { re: /\b(?:EP|Ep)\.?\s*(\d{1,3})\b/, epOnly: true },
+  { re: /\b(?:EP|Ep)\.?\s*(\d{1,4})\b/, epOnly: true },
   // E01 (standalone, not part of HEVC etc)
-  { re: /(?<![A-Za-z])[Ee](\d{2,3})(?![0-9])/, epOnly: true },
+  { re: /(?<![A-Za-z])[Ee](\d{2,4})(?![0-9])/, epOnly: true },
   // Episode 1, Episode.1
   { re: /Episode[\s._-]*(\d{1,3})/i, epOnly: true },
 ];
@@ -57,10 +57,10 @@ const SOURCE_PATTERNS = [
 ];
 
 const CODEC_PATTERNS = [
-  [/\bx\.?265\b|\bh\.?265\b|\bhevc\b/i, 'HEVC'],
-  [/\bx\.?264\b|\bh\.?264\b|\bavc\b/i, 'AVC'],
-  [/\bav1\b/i, 'AV1'],
-  [/\bvp9\b/i, 'VP9'],
+  [/(?:^|[\s._\-])(?:x\.?265|h\.?265|hevc)(?:[\s._\-]|$)/i, 'HEVC'],
+  [/(?:^|[\s._\-])(?:x\.?264|h\.?264|avc)(?:[\s._\-]|$)/i, 'AVC'],
+  [/(?:^|[\s._\-])av1(?:[\s._\-]|$)/i, 'AV1'],
+  [/(?:^|[\s._\-])vp9(?:[\s._\-]|$)/i, 'VP9'],
 ];
 
 const PLATFORM_TAGS = [
@@ -72,16 +72,16 @@ const PLATFORM_TAGS = [
 const AUDIO_PATTERNS = [
   [/dual[\s._-]?audio/i, 'Dual Audio'],
   [/multi[\s._-]?audio|multi[\s._-]?lang/i, 'Multi Audio'],
-  [/\bhindi\b|\bhin\b/i, 'Hindi'],
-  [/\btamil\b|\btam\b/i, 'Tamil'],
-  [/\btelugu\b|\btel\b/i, 'Telugu'],
-  [/\bmalayalam\b|\bmal\b/i, 'Malayalam'],
-  [/\bkannada\b|\bkan\b/i, 'Kannada'],
-  [/\bbengali\b|\bben\b/i, 'Bengali'],
-  [/\bpunjabi\b|\bpun\b/i, 'Punjabi'],
-  [/\bjapanese\b|\bjpn\b/i, 'Japanese'],
-  [/\bkorean\b|\bkor\b/i, 'Korean'],
-  [/\benglish\b|\beng\b/i, 'English'],
+  [/(?:^|[\s._\-])hindi(?:[\s._\-]|$)/i, 'Hindi'],
+  [/(?:^|[\s._\-])tamil(?:[\s._\-]|$)/i, 'Tamil'],
+  [/(?:^|[\s._\-])telugu(?:[\s._\-]|$)/i, 'Telugu'],
+  [/(?:^|[\s._\-])malayalam(?:[\s._\-]|$)/i, 'Malayalam'],
+  [/(?:^|[\s._\-])kannada(?:[\s._\-]|$)/i, 'Kannada'],
+  [/(?:^|[\s._\-])bengali(?:[\s._\-]|$)/i, 'Bengali'],
+  [/(?:^|[\s._\-])punjabi(?:[\s._\-]|$)/i, 'Punjabi'],
+  [/(?:^|[\s._\-])japanese(?:[\s._\-]|$)/i, 'Japanese'],
+  [/(?:^|[\s._\-])korean(?:[\s._\-]|$)/i, 'Korean'],
+  [/(?:^|[\s._\-])english(?:[\s._\-]|$)/i, 'English'],
 ];
 
 // ── Main parser ─────────────────────────────────────────────────────────────
@@ -90,10 +90,12 @@ export function parseFilename(raw) {
   let text = (raw || '').trim();
   if (!text) return _empty();
 
-  // 1. Strip channel tags, emoji, brackets
+  // 1. Strip channel tags, emoji, brackets prefix
   text = text.replace(/@[\w]+/g, '');
   text = text.replace(/^\[.*?\]\s*/g, '');
   text = text.replace(/[✅❤️🔥⭐🎬📽️🎥💿📀🆕🔴🟢]+/gu, '');
+  // Strip inline brackets for tag detection: [x264] → x264
+  const textWithoutBrackets = text.replace(/[\[\]()]/g, ' ');
   text = text.replace(/\s+/g, ' ').trim();
 
   // 2. Year
@@ -137,10 +139,10 @@ export function parseFilename(raw) {
     if (pat.test(text)) { sourceTag = val; break; }
   }
 
-  // 7. Codec
+  // 7. Codec (also check bracket-stripped text)
   let codec = null;
   for (const [pat, val] of CODEC_PATTERNS) {
-    if (pat.test(text)) { codec = val; break; }
+    if (pat.test(text) || pat.test(textWithoutBrackets)) { codec = val; break; }
   }
 
   // 8. Platform
@@ -149,10 +151,10 @@ export function parseFilename(raw) {
     return re.test(text);
   }) || null;
 
-  // 9. Audio / Language
+  // 9. Audio / Language (also check bracket-stripped text)
   let audio = null;
   for (const [pat, val] of AUDIO_PATTERNS) {
-    if (pat.test(text)) { audio = val; break; }
+    if (pat.test(text) || pat.test(textWithoutBrackets)) { audio = val; break; }
   }
 
   // 10. Clean title: everything before the first technical tag
@@ -162,9 +164,15 @@ export function parseFilename(raw) {
     text.search(/\d{3,4}p\b/i),
     text.search(/\b(?:WEB|BluRay|HDTV|REMUX|HEVC|x26[45]|AVC)\b/i),
     text.search(/\b(?:NF|NFLX|AMZN|DSNP|HMAX|ATVP)\b/),
-    text.search(/\b(?:Hindi|Dual|Tamil|Telugu|English)\b/i),
-    text.search(/\b(?:Season|SEASON)\s*\d/),
+    text.search(/\b(?:Hindi|Dual|Tamil|Telugu|English|Malayalam|Kannada|Bengali|Japanese|Korean)\b/i),
+    text.search(/\b(?:Season|SEASON)[\s._-]*\d/i),
     text.search(/\b\d{1,2}[xX]\d{2,3}\b/),
+    // Episode cut points (EP.N, Episode N, standalone E\d{2,3})
+    text.search(/\b(?:EP|Ep)\.?\s*\d{1,3}\b/),
+    text.search(/\bEpisode[\s._-]*\d/i),
+    text.search(/(?<![A-Za-z])[Ee]\d{2,4}(?!\d)/),
+    // Season pack cut points
+    text.search(/[Ss]\d{1,2}[\s._-]*(?:COMPLETE|FULL)\b/i),
   ].filter(i => i > 0);
 
   let title = text;
