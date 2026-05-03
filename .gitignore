@@ -46,3 +46,5 @@ app.*.map.json
 cloudflare-worker/node_modules/
 android/*.jks
 android/*.b64
+cloudflare-worker/.dev.vars
+cloudflare-worker/.wrangler/

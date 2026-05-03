@@ -16,29 +16,11 @@ import { parseFilename, normalize, parseTelegramHTML } from './parser.js';
 // ── Seed channels — verified active public channels ─────────────────────────
 
 const SEED_CHANNELS = [
-  // Movies (English, high quality)
-  { username: 'IMDbFilms', category: 'movies' },
-  { username: 'WEB_x264', category: 'movies' },
-  { username: 'MovieHubOfficials', category: 'movies' },
-  { username: 'request_movies_bot_group', category: 'movies' },
-  { username: 'Ikinopoisk', category: 'movies' },
-  // Hindi / Bollywood
-  { username: 'Aborek', category: 'bollywood' },
-  { username: 'HDHub4u_Movies', category: 'bollywood' },
-  { username: 'HindiDualAudio', category: 'bollywood' },
-  // TV Series / Web Series
-  { username: 'WebSeriesHDX', category: 'series' },
-  { username: 'TVSeriesProMax', category: 'series' },
-  { username: 'NetflixSeriesHD', category: 'series' },
-  // Anime
-  { username: 'Anime480pTo1080p', category: 'anime' },
-  // HEVC / Compressed
-  { username: 'HEVCx265', category: 'hevc' },
-  { username: 'x265_HEVC_Movies', category: 'hevc' },
-  // Dual Audio / Multi
-  { username: 'MultiAudioMovies', category: 'dual' },
-  // 4K / High quality
-  { username: 'UHD4KMovies', category: '4k' },
+  // ── Verified active via t.me/s/ probing (May 2026) ──────────────────────
+  // Movies (mixed content, high volume)
+  { username: 'Movie_World_Official', category: 'movies' },
+  { username: 'TeleFilm', category: 'movies' },
+  { username: 'Movies4K', category: 'movies' },
 ];
 
 const USER_AGENT =
@@ -159,7 +141,7 @@ export async function handleSearch(url, env) {
         is_season_pack: r.is_season_pack,
       }));
       // Fire-and-forget upsert
-      supabaseUpsert(env, 'tg_media', rows).catch(() => {});
+      supabaseUpsert(env, 'tg_media', rows).catch(() => { });
     }
   }
 
