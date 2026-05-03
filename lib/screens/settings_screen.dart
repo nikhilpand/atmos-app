@@ -28,7 +28,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   bool _wifiOnly = true;
   bool _autoDelete = false;
   int _maxConcurrent = 2;
-  DownloadSource _downloadSource = DownloadSource.auto;
+  DownloadSource _downloadSource = DownloadSource.telegram;
   bool _autoPlay = true;
   bool _rememberProvider = true;
   bool _skipIntro = false;
@@ -153,21 +153,6 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
           ),
 
-          // ── Download Source ─────────────────────────────────────────
-          _SectionHeader('Download Source'),
-          _SettingTile(
-            icon: Icons.swap_horiz_rounded,
-            title: 'Source Engine',
-            subtitle: _downloadSource.description,
-            trailing: _SourceDropdown(
-              value: _downloadSource,
-              onChanged: (v) {
-                setState(() => _downloadSource = v!);
-                ref.read(downloadSourceProvider.notifier).state = v!;
-                _save();
-              },
-            ),
-          ),
 
           // ── Telegram Account ───────────────────────────────────────
           _SectionHeader('Telegram'),
@@ -276,7 +261,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           _SettingTile(
             icon: Icons.bolt_rounded,
             title: 'Powered by',
-            subtitle: 'libtorrent 2.0 · TDLib · ffmpeg · flutter_inappwebview',
+            subtitle: 'TDLib · media_kit · flutter_inappwebview',
           ),
 
           const SizedBox(height: AppSpacing.xl),
@@ -746,33 +731,5 @@ class _QualityDropdown extends StatelessWidget {
   }
 }
 
-class _SourceDropdown extends StatelessWidget {
-  final DownloadSource value;
-  final void Function(DownloadSource?) onChanged;
-  const _SourceDropdown({required this.value, required this.onChanged});
 
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return DropdownButton<DownloadSource>(
-      value: value,
-      dropdownColor: cs.surfaceContainerHigh,
-      style: TextStyle(color: cs.onSurface, fontWeight: FontWeight.w600),
-      underline: const SizedBox.shrink(),
-      items: DownloadSource.values.map((s) => DropdownMenuItem(
-        value: s,
-        child: Row(mainAxisSize: MainAxisSize.min, children: [
-          Text(s.icon, style: const TextStyle(fontSize: 14)),
-          const SizedBox(width: AppSpacing.sm - AppSpacing.xs),
-          Text(
-            s == DownloadSource.auto     ? 'Auto'
-              : s == DownloadSource.torrent ? 'Torrent'
-              : 'Telegram',
-            style: const TextStyle(fontSize: 13),
-          ),
-        ]),
-      )).toList(),
-      onChanged: onChanged,
-    );
-  }
-}
+

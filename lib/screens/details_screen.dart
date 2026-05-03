@@ -5,7 +5,6 @@ import 'package:go_router/go_router.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import '../models/media_model.dart';
 import '../models/download_model.dart';
-import '../models/download_source.dart';
 import '../providers/providers.dart';
 import '../theme/app_theme.dart';
 import '../widgets/episode_tile.dart';
@@ -467,21 +466,12 @@ class _PlayButtonState extends ConsumerState<_PlayButton> {
 
     setState(() => _loadingDownload = true);
     try {
-      final source = ref.read(downloadSourceProvider);
-      final torrentSearch = ref.read(torrentSearchServiceProvider);
       final telegram = ref.read(telegramServiceProvider);
-      final imdbId = widget.details.imdbId ?? widget.details.id.toString();
 
       // ── Step 2: Build search futures (quality hint appended to Telegram query)
       final futures = <Future<List<QualityOption>>>[];
 
-      if (source != DownloadSource.telegram) {
-        if (widget.details.mediaType == MediaType.movie) {
-          futures.add(torrentSearch.searchMovie(imdbId));
-        }
-      }
-
-      if (source != DownloadSource.torrent && telegram.isLoggedIn) {
+      if (telegram.isLoggedIn) {
         // Append filter hints so TDLib search is more precise
         final hint = filters.searchHint;
         final queryTitle = hint.isNotEmpty
@@ -569,8 +559,7 @@ class _PlayButtonState extends ConsumerState<_PlayButton> {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(
-                'Downloading ${widget.details.title} in ${q.quality}'
-                '${q.source == "telegram" ? " via Telegram ⚡" : " via Torrent 🔗"}',
+                'Downloading ${widget.details.title} in ${q.quality} via Telegram ⚡',
               ),
               duration: const Duration(seconds: 3),
               behavior: SnackBarBehavior.floating,
@@ -875,13 +864,10 @@ class _EpisodesSection extends ConsumerWidget {
                     );
                     if (!context.mounted || filters == null) return;
 
-                    final source = ref.read(downloadSourceProvider);
-                    final torrentSearch = ref.read(torrentSearchServiceProvider);
                     final telegram = ref.read(telegramServiceProvider);
-                    final imdbId = details.imdbId ?? '';
-                    if (imdbId.isEmpty && source != DownloadSource.telegram) {
+                    if (!telegram.isLoggedIn) {
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('No IMDB ID found for this show')),
+                        const SnackBar(content: Text('Log in to Telegram in Settings to download')),
                       );
                       return;
                     }
@@ -890,17 +876,12 @@ class _EpisodesSection extends ConsumerWidget {
                     );
 
                     final futures = <Future<List<QualityOption>>>[];
-                    if (source != DownloadSource.telegram && imdbId.isNotEmpty) {
-                      futures.add(torrentSearch.searchEpisode(imdbId, selectedSeason, ep.episodeNumber));
-                    }
-                    if (source != DownloadSource.torrent && telegram.isLoggedIn) {
-                      final hint = filters.searchHint;
-                      final queryTitle = hint.isNotEmpty ? '${details.title} $hint' : details.title;
-                      futures.add(
-                        telegram.searchVideos(queryTitle, mediaType: 'tv', season: selectedSeason, episode: ep.episodeNumber)
-                            .then((r) => telegram.toQualityOptions(r)),
-                      );
-                    }
+                    final hint = filters.searchHint;
+                    final queryTitle = hint.isNotEmpty ? '${details.title} $hint' : details.title;
+                    futures.add(
+                      telegram.searchVideos(queryTitle, mediaType: 'tv', season: selectedSeason, episode: ep.episodeNumber)
+                          .then((r) => telegram.toQualityOptions(r)),
+                    );
 
                     if (futures.isEmpty) {
                       if (!context.mounted) return;

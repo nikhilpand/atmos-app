@@ -6,7 +6,6 @@ import '../models/download_source.dart';
 import '../services/tmdb_service.dart';
 import '../services/history_service.dart';
 import '../services/download_service.dart';
-import '../services/torrent_search_service.dart';
 import '../services/telegram_service.dart';
 import '../services/recommendation_service.dart';
 import '../services/watchlist_service.dart';
@@ -25,8 +24,6 @@ final downloadServiceProvider = ChangeNotifierProvider<DownloadService>((ref) {
   throw UnimplementedError('downloadServiceProvider must be overridden in main()');
 });
 
-final torrentSearchServiceProvider =
-    Provider<TorrentSearchService>((ref) => TorrentSearchService());
 
 final telegramServiceProvider = ChangeNotifierProvider<TelegramService>((ref) {
   throw UnimplementedError('telegramServiceProvider must be overridden in main()');
@@ -48,9 +45,9 @@ final watchlistProvider = ChangeNotifierProvider<WatchlistService>((ref) {
 /// OpenSubtitles API client — singleton, no init needed.
 final subtitleServiceProvider = Provider<SubtitleService>((ref) => SubtitleService());
 
-/// Current download source preference (auto / torrent / telegram).
+/// Current download source preference (telegram only).
 final downloadSourceProvider = StateProvider<DownloadSource>(
-  (ref) => DownloadSource.auto,
+  (ref) => DownloadSource.telegram,
 );
 
 // ─── Theme Seed Color ─────────────────────────────────────────────────────────

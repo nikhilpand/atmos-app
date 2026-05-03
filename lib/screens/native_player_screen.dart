@@ -19,20 +19,22 @@ List<(String, String)> _buildSourceList(
   final tvSources = [
     ('VidSrc.me', 'https://vidsrc.me/embed/tv?imdb=$imdbId&season=$season&episode=$episode'),
     ('Videasy', 'https://player.videasy.net/tv/$imdbId/$season/$episode'),
+    ('VidAPI', 'https://vaplayer.ru/embed/tv/$tmdbId/$season/$episode'),
+    ('VidLink', 'https://vidlink.pro/tv/$tmdbId/$season/$episode'),
     ('VidSrc ICU', 'https://vidsrc.icu/embed/tv/$imdbId/$season/$episode'),
     ('VidSrc Dev', 'https://vidsrc.dev/embed/tv/$imdbId/$season/$episode'),
     ('VidFast', 'https://vidfast.pro/tv/$imdbId/$season/$episode'),
-    ('VidLink', 'https://vidlink.pro/tv/$imdbId/$season/$episode'),
     // tmdbId fallback for providers that need it
     ('AutoEmbed', 'https://autoembed.co/tv/tmdb/$tmdbId-$season-$episode'),
   ];
   final movieSources = [
     ('VidSrc.me', 'https://vidsrc.me/embed/movie?imdb=$imdbId'),
     ('Videasy', 'https://player.videasy.net/movie/$imdbId'),
+    ('VidAPI', 'https://vaplayer.ru/embed/movie/$imdbId'),
+    ('VidLink', 'https://vidlink.pro/movie/$tmdbId'),
     ('VidSrc ICU', 'https://vidsrc.icu/embed/movie/$imdbId'),
     ('VidSrc Dev', 'https://vidsrc.dev/embed/movie/$imdbId'),
     ('VidFast', 'https://vidfast.pro/movie/$imdbId'),
-    ('VidLink', 'https://vidlink.pro/movie/$imdbId'),
     ('AutoEmbed', 'https://autoembed.co/movie/tmdb/$tmdbId'),
   ];
   return type == 'tv' ? tvSources : movieSources;

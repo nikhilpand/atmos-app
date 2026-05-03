@@ -198,9 +198,9 @@ class _Page2 extends StatelessWidget {
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              _EngineCard(emoji: '⚡', label: 'Torrent', sub: 'libtorrent 2.0'),
-              const SizedBox(width: AppSpacing.md),
               _EngineCard(emoji: '✈️', label: 'Telegram', sub: 'CDN · 500 MB/s'),
+              const SizedBox(width: AppSpacing.md),
+              _EngineCard(emoji: '🎬', label: 'Streaming', sub: '10+ providers'),
             ],
           ).animate().fadeIn(delay: 100.ms).slideY(begin: 0.1, end: 0),
           const SizedBox(height: AppSpacing.xl),
@@ -217,7 +217,7 @@ class _Page2 extends StatelessWidget {
           ).animate().fadeIn(delay: 200.ms),
           const SizedBox(height: AppSpacing.lg),
           Text(
-            'Powered by BitTorrent and Telegram CDN.\nDownload at full speed. Watch offline, anywhere.',
+            'Powered by Telegram CDN and 10+ streaming providers.\nDownload at full speed. Watch offline, anywhere.',
             style: Theme.of(context).textTheme.bodyLarge?.copyWith(
               color: cs.onSurfaceVariant,
               height: 1.6,

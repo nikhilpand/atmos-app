@@ -3,30 +3,24 @@ import 'dart:io';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hive_flutter/hive_flutter.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:libtorrent_flutter/libtorrent_flutter.dart';
 import '../models/download_model.dart';
-import 'torrent_search_service.dart';
 import 'telegram_service.dart';
+import 'atmos_index_client.dart';
 
-/// Central download engine. Manages a queue of [DownloadTask]s and routes
-/// each one through the best available download method:
+/// Central download engine — Telegram CDN only.
 ///
-///   1. libtorrent_flutter  — full in-app BitTorrent via YTS / EZTV magnets
-///   2. Telegram CDN        — direct file download via TDLib
+/// Routes all downloads through TDLib's file download API:
+///   - AtmosIndex catalog search → resolve file_id → TDLib downloadFile
+///   - Supports full-season batch downloads
+///
+/// Torrent engine has been removed to reduce APK size and library count.
 class DownloadService extends ChangeNotifier {
   static const _boxName = 'downloads_v1';
 
   late Box<DownloadTask> _box;
-  final _torrentSearch = TorrentSearchService();
-  bool _engineReady = false;
   int _maxConcurrent = 2;
   bool _wifiOnly = false;
-
-  // Internal torrent-id → task-id mapping
-  final _torrentMap = <int, String>{};
-  StreamSubscription? _torrentSub;
   TelegramService? telegramService;
 
   // Speed tracking for Telegram: fileId → (lastBytes, lastTimestamp)
@@ -54,22 +48,6 @@ class DownloadService extends ChangeNotifier {
     _maxConcurrent = prefs.getInt('dl_max_concurrent') ?? 2;
     _wifiOnly = prefs.getBool('dl_wifi_only') ?? false;
 
-    // Init libtorrent engine
-    try {
-      await LibtorrentFlutter.init(
-        defaultSavePath: downloadDir,
-        fetchTrackers: true,
-        pollInterval: const Duration(milliseconds: 500),
-      );
-      _engineReady = true;
-
-      // Listen to torrent progress updates
-      _torrentSub = LibtorrentFlutter.instance.torrentUpdates.listen(_onTorrentUpdate);
-    } catch (e) {
-      debugPrint('[DownloadService] libtorrent init failed: $e');
-      _engineReady = false;
-    }
-
     // Reset any stale "downloading" tasks from last session
     for (final task in _box.values) {
       if (task.status == DownloadStatus.downloading ||
@@ -91,8 +69,6 @@ class DownloadService extends ChangeNotifier {
 
   @override
   Future<void> dispose() async {
-    _torrentSub?.cancel();
-    if (_engineReady) await LibtorrentFlutter.instance.dispose();
     await _box.close();
     super.dispose();
   }
@@ -110,7 +86,7 @@ class DownloadService extends ChangeNotifier {
           t.status == DownloadStatus.converting ||
           t.status == DownloadStatus.paused ||
           t.status == DownloadStatus.queued ||
-          t.status == DownloadStatus.failed)   // ← C4: failed tasks visible in Active
+          t.status == DownloadStatus.failed)
       .toList();
 
   List<DownloadTask> get completed =>
@@ -148,7 +124,7 @@ class DownloadService extends ChangeNotifier {
     String? episodeName,
     String? posterPath,
   }) async {
-    // ── M2: Wi-Fi check
+    // ── Wi-Fi check
     if (_wifiOnly) {
       final conn = await Connectivity().checkConnectivity();
       if (!conn.contains(ConnectivityResult.wifi)) {
@@ -158,7 +134,7 @@ class DownloadService extends ChangeNotifier {
           season: season, episode: episode, episodeName: episodeName,
           quality: quality.quality, posterPath: posterPath,
           fileSizeBytes: quality.sizeBytes, audioChannels: quality.audioChannels,
-          videoCodec: quality.videoCodec, source: quality.source,
+          videoCodec: quality.videoCodec, source: 'telegram',
           telegramFileId: quality.telegramFileId, createdAt: DateTime.now(),
           status: DownloadStatus.failed,
           error: 'Wi-Fi Only mode is on. Connect to Wi-Fi to download.',
@@ -192,7 +168,7 @@ class DownloadService extends ChangeNotifier {
       fileSizeBytes: quality.sizeBytes,
       audioChannels: quality.audioChannels,
       videoCodec: quality.videoCodec,
-      source: quality.source,
+      source: 'telegram',
       telegramFileId: quality.telegramFileId,
       createdAt: DateTime.now(),
       status: DownloadStatus.queued,
@@ -207,30 +183,9 @@ class DownloadService extends ChangeNotifier {
         t.status == DownloadStatus.converting).length;
 
     if (activeCount < _maxConcurrent) {
-      if (task.source == 'telegram') {
-        _processTelegramTask(task, quality.telegramFileId);
-      } else {
-        // Build magnet URI from hash if the caller didn't supply a full magnet
-        final magnet = quality.magnet.isNotEmpty
-            ? quality.magnet
-            : _buildMagnet(quality.hash, task.title);
-        _processTask(task, magnet);
-      }
+      _processTelegramTask(task, quality.telegramFileId);
     }
     return task;
-  }
-
-  /// Build a magnet URI from an info-hash and title.
-  /// Adds popular public trackers to maximise peer discovery.
-  String _buildMagnet(String hash, String title) {
-    if (hash.isEmpty) return '';
-    final encoded = Uri.encodeComponent(title);
-    const trackers = [
-      'tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce',
-      'tr=udp%3A%2F%2Ftracker.openbittorrent.com%3A6969%2Fannounce',
-      'tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce',
-    ];
-    return 'magnet:?xt=urn:btih:$hash&dn=$encoded&${trackers.join('&')}';
   }
 
   /// Retry a failed task.
@@ -249,22 +204,6 @@ class DownloadService extends ChangeNotifier {
   Future<void> pauseTask(String id) async {
     final task = _box.get(id);
     if (task == null) return;
-
-    if (task.source == 'telegram') {
-      // Pause Telegram: just mark paused — TDLib pauses automatically when we
-      // stop consuming progress; we'll re-call downloadFile on resume.
-      task.status = DownloadStatus.paused;
-      await task.save();
-      _scheduleNotify();
-      return;
-    }
-
-    final torrentId = _torrentMap.entries
-        .firstWhere((e) => e.value == id, orElse: () => const MapEntry(-1, ''))
-        .key;
-    if (torrentId >= 0 && _engineReady) {
-      LibtorrentFlutter.instance.pauseTorrent(torrentId);
-    }
     task.status = DownloadStatus.paused;
     await task.save();
     _scheduleNotify();
@@ -274,47 +213,22 @@ class DownloadService extends ChangeNotifier {
     final task = _box.get(id);
     if (task == null || task.status != DownloadStatus.paused) return;
 
-    // ── C2: Telegram resume — re-kick the download via TDLib
-    if (task.source == 'telegram') {
-      if (task.telegramFileId == null || telegramService == null) {
-        await _failTask(task, 'Telegram file ID missing — re-download needed');
-        return;
-      }
-      task.status = DownloadStatus.downloading;
-      await task.save();
-      _scheduleNotify();
-      telegramService!.downloadFile(task.telegramFileId!).catchError((e) async {
-        await _failTask(task, 'Telegram resume failed: $e');
-        return '';
-      });
+    if (task.telegramFileId == null || telegramService == null) {
+      await _failTask(task, 'Telegram file ID missing — re-download needed');
       return;
     }
-
-    final torrentId = _torrentMap.entries
-        .firstWhere((e) => e.value == id, orElse: () => const MapEntry(-1, ''))
-        .key;
-    if (torrentId >= 0 && _engineReady) {
-      LibtorrentFlutter.instance.resumeTorrent(torrentId);
-      task.status = DownloadStatus.downloading;
-      await task.save();
-      _scheduleNotify();
-    } else {
-      // Torrent was lost from memory (app restart) — re-search
-      _requeue(task);
-    }
+    task.status = DownloadStatus.downloading;
+    await task.save();
+    _scheduleNotify();
+    telegramService!.downloadFile(task.telegramFileId!).catchError((e) async {
+      await _failTask(task, 'Telegram resume failed: $e');
+      return '';
+    });
   }
 
   Future<void> deleteTask(String id) async {
     final task = _box.get(id);
     if (task == null) return;
-    // Remove torrent
-    final torrentId = _torrentMap.entries
-        .firstWhere((e) => e.value == id, orElse: () => const MapEntry(-1, ''))
-        .key;
-    if (torrentId >= 0 && _engineReady) {
-      LibtorrentFlutter.instance.removeTorrent(torrentId, deleteFiles: true);
-      _torrentMap.remove(torrentId);
-    }
     // Clean up speed tracker
     if (task.telegramFileId != null) {
       _telegramSpeedMap.remove(task.telegramFileId);
@@ -327,22 +241,102 @@ class DownloadService extends ChangeNotifier {
     _scheduleNotify();
   }
 
-  // ── Internal — Torrent path ───────────────────────────────────────────────
+  // ── Season Batch Download ────────────────────────────────────────────────
 
-  void _processTask(DownloadTask task, String magnet) async {
-    if (!_engineReady) {
-      await _failTask(task, 'Torrent engine not available');
-      return;
-    }
-    await _updateTask(task, status: DownloadStatus.downloading);
+  /// Download all episodes of a season. Queries AtmosIndex for the full
+  /// episode list, resolves each to a TDLib file_id, and queues downloads.
+  /// Returns list of queued DownloadTasks.
+  Future<List<DownloadTask>> downloadSeason({
+    required int tmdbId,
+    required String imdbId,
+    required String title,
+    required int season,
+    required int totalEpisodes,
+    String? posterPath,
+    String preferredQuality = '1080p',
+  }) async {
+    if (telegramService == null) return [];
 
-    try {
-      final torrentId = LibtorrentFlutter.instance.addMagnet(magnet);
-      _torrentMap[torrentId] = task.id;
-    } catch (e) {
-      await _failTask(task, 'Failed to add magnet: $e');
+    final indexClient = telegramService!.indexClient;
+    if (!indexClient.isConfigured) {
+      debugPrint('[DownloadService] AtmosIndex not configured for season download');
+      return [];
     }
+
+    debugPrint('[DownloadService] Starting season $season download: $title ($totalEpisodes episodes)');
+
+    // 1. Get all episodes from the catalog
+    final catalogResults = await indexClient.getSeason(title, season);
+    debugPrint('[DownloadService] Catalog returned ${catalogResults.length} results for S$season');
+
+    final tasks = <DownloadTask>[];
+
+    // 2. For each episode, find best match and queue download
+    for (int ep = 1; ep <= totalEpisodes; ep++) {
+      // Skip already downloaded
+      if (isDownloaded(tmdbId, season: season, episode: ep)) {
+        debugPrint('[DownloadService] S${season}E$ep already downloaded, skipping');
+        continue;
+      }
+      if (isDownloading(tmdbId, season: season, episode: ep)) {
+        debugPrint('[DownloadService] S${season}E$ep already downloading, skipping');
+        continue;
+      }
+
+      // Find best match for this episode
+      final matches = catalogResults.where((r) => r.episode == ep).toList();
+      if (matches.isEmpty) {
+        debugPrint('[DownloadService] No catalog result for S${season}E$ep');
+        continue;
+      }
+
+      // Prefer matching quality, fallback to first result
+      final match = matches.firstWhere(
+        (r) => r.quality == preferredQuality,
+        orElse: () => matches.first,
+      );
+
+      // 3. Resolve channel+msgId to TDLib file_id
+      final fileId = await telegramService!.resolveFileId(
+        match.channelUsername,
+        match.msgId,
+      );
+
+      if (fileId == null) {
+        debugPrint('[DownloadService] Could not resolve file_id for S${season}E$ep');
+        continue;
+      }
+
+      // 4. Queue the download
+      final quality = QualityOption(
+        quality: match.quality,
+        hash: '',
+        sizeBytes: match.fileSizeBytes,
+        type: '@${match.channelUsername}',
+        videoCodec: match.codec,
+        audioChannels: match.audio,
+        telegramFileId: fileId,
+      );
+
+      final task = await startDownload(
+        tmdbId: tmdbId,
+        imdbId: imdbId,
+        title: title,
+        mediaType: 'tv',
+        quality: quality,
+        season: season,
+        episode: ep,
+        posterPath: posterPath,
+      );
+      tasks.add(task);
+      debugPrint('[DownloadService] Queued S${season}E$ep ($fileId)');
+    }
+
+    debugPrint('[DownloadService] Season download queued: ${tasks.length}/$totalEpisodes episodes');
+    return tasks;
   }
+
+  // ── Internal — Telegram download path ────────────────────────────────────
 
   void _processTelegramTask(DownloadTask task, int? fileId) {
     if (fileId == null || telegramService == null) {
@@ -357,7 +351,7 @@ class DownloadService extends ChangeNotifier {
   }
 
   /// Called by main.dart listener on every TelegramService.notifyListeners().
-  /// H2: computes speed via delta bytes / delta time.
+  /// Computes speed via delta bytes / delta time.
   void syncTelegramProgress(
       int fileId, double progress, int downloadedBytes, bool isComplete, String? path) {
     final task = allTasks.where((t) => t.telegramFileId == fileId).firstOrNull;
@@ -396,63 +390,6 @@ class DownloadService extends ChangeNotifier {
     _scheduleNotify();
   }
 
-  void _onTorrentUpdate(Map<int, TorrentInfo> torrents) async {
-    bool changed = false;
-
-    for (final entry in torrents.entries) {
-      final torrentId = entry.key;
-      final info = entry.value;
-      final taskId = _torrentMap[torrentId];
-      if (taskId == null) continue;
-
-      final task = _box.get(taskId);
-      if (task == null) continue;
-
-      // Skip paused tasks
-      if (task.status == DownloadStatus.paused) continue;
-
-      final newProgress = info.progress.clamp(0.0, 1.0);
-
-      if (info.state.label == 'Seeding' || newProgress >= 1.0) {
-        // Done — find the largest video file
-        if (_engineReady) {
-          final files = LibtorrentFlutter.instance.getFiles(torrentId);
-          final videoFile = files
-              .where((f) => _isVideoFile(f.name))
-              .fold<FileInfo?>(null, (a, b) => a == null || b.size > a.size ? b : a);
-          if (videoFile != null) {
-            task.filePath = videoFile.path ?? task.filePath;
-          }
-        }
-        task.status = DownloadStatus.completed;
-        task.progress = 1.0;
-        task.downloadSpeed = 0;
-        await task.save();   // ← C7: awaited
-        _torrentMap.remove(torrentId);
-        changed = true;
-        _processNextQueued();
-      } else {
-        task.progress = newProgress;
-        task.downloadedBytes = info.totalDone;
-        task.downloadSpeed = info.downloadRate.toDouble();
-        task.fileSizeBytes = info.totalWanted > 0 ? info.totalWanted : task.fileSizeBytes;
-        await task.save();   // ← C7: awaited
-        changed = true;
-      }
-    }
-
-    // ── H1: single notifyListeners() per poll cycle, not per torrent ─────
-    if (changed) _scheduleNotify();
-  }
-
-  // ── Internal — FFmpeg / HLS path (placeholder) ───────────────────────────
-  // Note: HLS→MP4 via FFmpeg is planned for a future release once a
-  // maintained community fork of ffmpeg_kit is available for Flutter.
-
-  void _processHlsTask(DownloadTask task, String m3u8Url) {
-    _failTask(task, 'HLS download not yet available. Please use torrent sources.');
-  }
-
   // ── Queue management ──────────────────────────────────────────────────────
 
   void _processNextQueued() {
@@ -460,9 +397,8 @@ class DownloadService extends ChangeNotifier {
         t.status == DownloadStatus.downloading ||
         t.status == DownloadStatus.searching ||
         t.status == DownloadStatus.converting).length;
-    if (activeRunning >= _maxConcurrent) return;  // ← H3: uses live setting
+    if (activeRunning >= _maxConcurrent) return;
 
-    // ── C6: use firstOrNull, not a phantom DownloadTask orElse
     final next = allTasks.firstWhereOrNull(
       (t) => t.status == DownloadStatus.queued,
     );
@@ -471,40 +407,15 @@ class DownloadService extends ChangeNotifier {
   }
 
   void _requeue(DownloadTask task) async {
-    await _updateTask(task, status: DownloadStatus.searching);
-
-    // ── H4: route Telegram tasks back through Telegram
-    if (task.source == 'telegram') {
-      if (task.telegramFileId != null && telegramService != null) {
-        await _updateTask(task, status: DownloadStatus.downloading);
-        telegramService!.downloadFile(task.telegramFileId!).catchError((e) async {
-          await _failTask(task, 'Telegram re-queue failed: $e');
-          return '';
-        });
-      } else {
-        await _failTask(task, 'Telegram source unavailable — file ID missing');
-      }
-      return;
+    if (task.telegramFileId != null && telegramService != null) {
+      await _updateTask(task, status: DownloadStatus.downloading);
+      telegramService!.downloadFile(task.telegramFileId!).catchError((e) async {
+        await _failTask(task, 'Telegram re-queue failed: $e');
+        return '';
+      });
+    } else {
+      await _failTask(task, 'Telegram source unavailable — file ID missing');
     }
-
-    // Torrent path — re-search for magnet
-    List<QualityOption> options = [];
-    if (task.mediaType == 'movie') {
-      options = await _torrentSearch.searchMovie(
-          task.imdbId.isNotEmpty ? task.imdbId : task.tmdbId.toString());
-    } else if (task.season != null && task.episode != null) {
-      options = await _torrentSearch.searchEpisode(
-          task.imdbId, task.season!, task.episode!);
-    }
-    if (options.isEmpty) {
-      await _failTask(task, 'No sources found');
-      return;
-    }
-    final match = options.firstWhere(
-      (o) => o.quality.toLowerCase().startsWith(task.quality.toLowerCase()),
-      orElse: () => options.first,
-    );
-    _processTask(task, match.magnet);
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
@@ -524,14 +435,14 @@ class DownloadService extends ChangeNotifier {
     if (status != null) task.status = status;
     if (progress != null) task.progress = progress;
     if (filePath != null) task.filePath = filePath;
-    await task.save();  // ← C7: awaited
+    await task.save();
     _scheduleNotify();
   }
 
   Future<void> _failTask(DownloadTask task, String error) async {
     task.status = DownloadStatus.failed;
     task.error = error;
-    await task.save();  // ← C7: awaited
+    await task.save();
     _scheduleNotify();
     debugPrint('[DownloadService] FAILED ${task.id}: $error');
   }
@@ -540,11 +451,6 @@ class DownloadService extends ChangeNotifier {
     final s = season != null ? 's${season}e$episode' : '';
     final q = quality.replaceAll('.', '-');
     return '${tmdbId}_${s}_$q';
-  }
-
-  bool _isVideoFile(String name) {
-    final ext = name.split('.').last.toLowerCase();
-    return ['mkv', 'mp4', 'avi', 'mov', 'wmv', 'm4v'].contains(ext);
   }
 }
 

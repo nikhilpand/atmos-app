@@ -7,6 +7,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:handy_tdlib/handy_tdlib.dart' as td;
 import '../models/telegram_search_result.dart';
 import '../models/download_model.dart';
+import 'atmos_index_client.dart';
 
 // ════════════════════════════════════════════════════════════════════════════════
 // TDLib Auth States
@@ -57,6 +58,10 @@ class TelegramDownloadProgress {
 // TDLib runs on a background isolate to keep UI smooth.
 
 class TelegramService extends ChangeNotifier {
+  // AtmosIndex catalog client (works without TDLib login)
+  final AtmosIndexClient _indexClient = AtmosIndexClient();
+  AtmosIndexClient get indexClient => _indexClient;
+
   // Auth
   TelegramAuthState _authState = TelegramAuthState.uninitialized;
   String? _phone;
@@ -182,11 +187,10 @@ class TelegramService extends ChangeNotifier {
     _send(td.LogOut());
   }
 
-  // ── Global Search ─────────────────────────────────────────────────────────
+  // ── Global Search (Hybrid: AtmosIndex catalog + TDLib) ────────────────────
 
-  /// Search public Telegram channels for videos matching the title.
-  /// Fires multiple parallel queries with different formulations and
-  /// deduplicates by fileId so the caller gets the richest result set.
+  /// Search for videos — works WITHOUT Telegram login via AtmosIndex catalog.
+  /// If the user IS logged in, also runs TDLib search in parallel and merges.
   Future<List<TelegramSearchResult>> searchVideos(
     String title, {
     int? year,
@@ -194,42 +198,103 @@ class TelegramService extends ChangeNotifier {
     int? season,
     int? episode,
   }) async {
-    if (!isLoggedIn) return [];
-
-    // ── Build query variants ───────────────────────────────────────────────
-    // Different channels name files differently, so we search multiple ways:
-    //   "Inception"         → channels tagged by title only
-    //   "Inception 2010"    → year-tagged uploads
-    //   "Inception 1080"    → quality-tagged uploads
-    //   "Inception S01E01"  → TV episode-specific
     final base = title.trim();
-    final withYear = year != null ? '$base $year' : null;
-    final withQuality = '$base 1080';
-    final ep = (mediaType == 'tv' && season != null && episode != null)
-        ? '$base S${season.toString().padLeft(2, "0")}E${episode.toString().padLeft(2, "0")}'
-        : null;
+    if (base.isEmpty) return [];
 
-    final queries = <String>{
-      base,
-      if (withYear != null) withYear,
-      withQuality,
-      if (ep != null) ep,
-    }.toList();
-
-    final cacheKey = base.toLowerCase();
+    final cacheKey = '${base.toLowerCase()}_${season ?? ''}_${episode ?? ''}';
     final cached = _searchCache[cacheKey];
     if (cached != null && cached.isValid) {
       debugPrint('[Telegram] Cache hit: ${cached.results.length} results for "$base"');
       return cached.results;
     }
 
-    debugPrint('[Telegram] Searching ${queries.length} query variants for "$base"');
+    // ── Stage 1: AtmosIndex catalog (anonymous, no login needed) ────────────
+    final catalogFuture = _indexClient.isConfigured
+        ? _indexClient.search(base, year: year, season: season, episode: episode)
+        : Future.value(<IndexedMedia>[]);
+
+    // ── Stage 2: TDLib direct search (only if logged in) ───────────────────
+    final tdlibFuture = isLoggedIn
+        ? _searchViaTdlib(base, year: year, mediaType: mediaType, season: season, episode: episode)
+        : Future.value(<TelegramSearchResult>[]);
+
+    // Run both in parallel
+    final results = await Future.wait([catalogFuture, tdlibFuture]);
+    final catalogResults = results[0] as List<IndexedMedia>;
+    final tdlibResults = results[1] as List<TelegramSearchResult>;
+
+    // Convert catalog results to TelegramSearchResult format
+    final catalogConverted = catalogResults.map((r) => TelegramSearchResult(
+      fileId: 0, // Will be resolved via resolveFileId before download
+      fileSize: r.fileSizeBytes,
+      fileName: r.fileName,
+      caption: '',
+      channelTitle: '@${r.channelUsername}',
+      channelId: 0,
+      messageId: r.msgId,
+      quality: r.quality,
+      videoCodec: r.codec,
+      audioInfo: r.audio,
+      uploadDate: DateTime.now(),
+    )).toList();
+
+    // Merge: TDLib results first (have file_id), then catalog results
+    final seen = <String>{};
+    final merged = <TelegramSearchResult>[];
+
+    for (final r in tdlibResults) {
+      final key = '${r.fileId}';
+      if (seen.add(key)) merged.add(r);
+    }
+    for (final r in catalogConverted) {
+      // Dedupe by channelTitle+messageId
+      final key = '${r.channelTitle}:${r.messageId}';
+      if (seen.add(key)) merged.add(r);
+    }
+
+    merged.sort((a, b) => _qualityOrder(a.quality).compareTo(_qualityOrder(b.quality)));
+
+    _searchCache[cacheKey] = _CachedSearch(merged);
+    debugPrint('[Telegram] Hybrid search: ${catalogConverted.length} catalog + ${tdlibResults.length} TDLib = ${merged.length} merged for "$base"');
+    return merged;
+  }
+
+  /// TDLib-only search path (original logic, requires login).
+  Future<List<TelegramSearchResult>> _searchViaTdlib(
+    String title, {
+    int? year,
+    String? mediaType,
+    int? season,
+    int? episode,
+  }) async {
+    final base = title.trim();
+    final withYear = year != null ? '$base $year' : null;
+    final with1080 = '$base 1080p';
+    final with720 = '$base 720p';
+    final with1080Year = year != null ? '$base $year 1080p' : null;
+    final ep = (mediaType == 'tv' && season != null && episode != null)
+        ? '$base S${season.toString().padLeft(2, "0")}E${episode.toString().padLeft(2, "0")}'
+        : null;
+    final epAlt = (mediaType == 'tv' && season != null && episode != null)
+        ? '$base Season $season Episode $episode'
+        : null;
+
+    final queries = <String>{
+      base,
+      if (withYear != null) withYear,
+      with1080,
+      with720,
+      if (with1080Year != null) with1080Year,
+      if (ep != null) ep,
+      if (epAlt != null) epAlt,
+    }.toList();
+
+    debugPrint('[Telegram] TDLib searching ${queries.length} variants for "$base"');
 
     try {
       final futures = queries.map((q) => _searchOnce(q, season, episode)).toList();
       final allLists = await Future.wait(futures);
 
-      // Merge and deduplicate by fileId
       final seen = <int>{};
       final merged = <TelegramSearchResult>[];
       for (final list in allLists) {
@@ -237,17 +302,56 @@ class TelegramService extends ChangeNotifier {
           if (seen.add(r.fileId)) merged.add(r);
         }
       }
-
-      merged.sort((a, b) => _qualityOrder(a.quality).compareTo(_qualityOrder(b.quality)));
-
-      _searchCache[cacheKey] = _CachedSearch(merged);
-      debugPrint('[Telegram] Merged ${merged.length} unique results for "$base"');
       return merged;
     } catch (e) {
-      debugPrint('[Telegram] Search error: $e');
+      debugPrint('[Telegram] TDLib search error: $e');
       return [];
     }
   }
+
+  // ── File Resolution ────────────────────────────────────────────────────────
+
+  /// Resolve a channel_username + msg_id (from AtmosIndex catalog) to a
+  /// TDLib file_id that can be used with downloadFile().
+  /// Requires TDLib login.
+  Future<int?> resolveFileId(String channelUsername, int messageId) async {
+    if (!isLoggedIn) return null;
+
+    try {
+      // Step 1: Resolve channel username → chat_id
+      final chatId = await _resolveChatId(channelUsername.replaceAll('@', ''));
+      if (chatId == null) return null;
+
+      // Step 2: Get the specific message
+      final c = Completer<int?>();
+      final id = _nextExtra();
+      _pendingResolves[id] = c;
+      _send(td.GetMessage(chatId: chatId, messageId: messageId), extra: id);
+
+      return c.future.timeout(const Duration(seconds: 15), onTimeout: () {
+        _pendingResolves.remove(id);
+        return null;
+      });
+    } catch (e) {
+      debugPrint('[Telegram] resolveFileId error: $e');
+      return null;
+    }
+  }
+
+  Future<int?> _resolveChatId(String username) async {
+    final c = Completer<int?>();
+    final id = _nextExtra();
+    _pendingChatResolves[id] = c;
+    _send(td.SearchPublicChat(username: username), extra: id);
+    return c.future.timeout(const Duration(seconds: 10), onTimeout: () {
+      _pendingChatResolves.remove(id);
+      return null;
+    });
+  }
+
+  // Pending resolution completers
+  final _pendingResolves = <int, Completer<int?>>{};        // extra → fileId
+  final _pendingChatResolves = <int, Completer<int?>>{};    // extra → chatId
 
   /// Single TDLib SearchMessages call — tries both Document and Video filters
   /// then merges deduped results.

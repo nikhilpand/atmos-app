@@ -2,3 +2,15 @@ name = "atmos-extractor"
 main = "worker.js"
 compatibility_date = "2024-04-29"
 workers_dev = true
+
+# ── AtmosIndex: Cron trigger for background channel crawling ─────────────────
+# Runs every 6 hours to scrape t.me/s/ pages and index media into Supabase.
+# Free tier allows 5 cron triggers per account.
+[triggers]
+crons = ["0 */6 * * *"]
+
+# ── Environment variables ────────────────────────────────────────────────────
+# Set these via `wrangler secret put SUPABASE_URL` and `wrangler secret put SUPABASE_ANON_KEY`
+# Or define them in .dev.vars for local testing:
+#   SUPABASE_URL=https://xxxx.supabase.co
+#   SUPABASE_ANON_KEY=eyJhbGci...

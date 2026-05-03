@@ -23,6 +23,7 @@ const _provs = [
   _P('Videasy', 'https://player.videasy.net/{t}/{id}'),
   _P('VidSrc ICU', 'https://vidsrc.icu/embed/{t}/{id}'),
   _P('VidLink', 'https://vidlink.pro/{t}/{id}'),
+  _P('VidAPI', 'https://vaplayer.ru/embed/{t}/{id}'),
   _P('2Embed', 'https://www.2embed.cc/embed/{id}',
       tv: 'https://www.2embed.cc/embedtv/{id}?s={s}&e={e}'),
   _P('VidSrc Dev', 'https://vidsrc.dev/embed/{t}/{id}'),

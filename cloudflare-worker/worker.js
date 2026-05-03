@@ -1,43 +1,50 @@
 /**
- * Atmos Extraction Cloudflare Worker
- * 
- * Bypasses Cloudflare bot detection on streaming providers by acting as
- * a trusted browser-like proxy. Implements a multi-source waterfall with
- * automatic retries and Referer header injection.
- * 
+ * Atmos Cloudflare Worker
+ *
+ * Two engines in one worker:
+ *   1. Stream Extraction — proxy embed providers for HLS/MP4 URLs
+ *   2. AtmosIndex — Telegram content discovery (search, crawl, index)
+ *
  * Deploy: wrangler deploy
- * Free tier: 100,000 requests/day — more than enough.
+ * Free tier: 100,000 requests/day + 5 cron triggers.
  */
+
+import {
+  handleSearch,
+  handleSeasonSearch,
+  handleStats,
+  runCrawl,
+} from './atmos-index.js';
 
 const PROVIDERS = [
   {
     name: 'vidsrc.xyz',
-    movieUrl: (id) => `https://vidsrc.xyz/embed/movie?imdb=${id}`,
-    tvUrl: (id, s, e) => `https://vidsrc.xyz/embed/tv?imdb=${id}&season=${s}&episode=${e}`,
+    movieUrl: (imdb, tmdb) => `https://vidsrc.xyz/embed/movie?imdb=${imdb}`,
+    tvUrl: (imdb, tmdb, s, e) => `https://vidsrc.xyz/embed/tv?imdb=${imdb}&season=${s}&episode=${e}`,
     referer: 'https://vidsrc.xyz',
   },
   {
     name: 'vidsrc.me',
-    movieUrl: (id) => `https://vidsrc.me/embed/movie?imdb=${id}`,
-    tvUrl: (id, s, e) => `https://vidsrc.me/embed/tv?imdb=${id}&season=${s}&episode=${e}`,
+    movieUrl: (imdb, tmdb) => `https://vidsrc.me/embed/movie?imdb=${imdb}`,
+    tvUrl: (imdb, tmdb, s, e) => `https://vidsrc.me/embed/tv?imdb=${imdb}&season=${s}&episode=${e}`,
     referer: 'https://vidsrc.me',
   },
   {
-    name: 'embed.su',
-    movieUrl: (id) => `https://embed.su/embed/movie/${id}`,
-    tvUrl: (id, s, e) => `https://embed.su/embed/tv/${id}/${s}/${e}`,
-    referer: 'https://embed.su',
+    name: 'vidlink.pro',
+    movieUrl: (imdb, tmdb) => `https://vidlink.pro/movie/${tmdb}`,
+    tvUrl: (imdb, tmdb, s, e) => `https://vidlink.pro/tv/${tmdb}/${s}/${e}`,
+    referer: 'https://vidlink.pro',
   },
   {
-    name: 'autoembed.cc',
-    movieUrl: (id) => `https://autoembed.cc/embed/movie/${id}`,
-    tvUrl: (id, s, e) => `https://autoembed.cc/embed/tv/${id}/${s}/${e}`,
-    referer: 'https://autoembed.cc',
+    name: 'vidapi.ru',
+    movieUrl: (imdb, tmdb) => `https://vaplayer.ru/embed/movie/${imdb}`,
+    tvUrl: (imdb, tmdb, s, e) => `https://vaplayer.ru/embed/tv/${tmdb}/${s}/${e}`,
+    referer: 'https://vidapi.ru',
   },
   {
-    name: 'multiembed.mov',
-    movieUrl: (id) => `https://multiembed.mov/directstream.php?imdb_id=${id}`,
-    tvUrl: (id, s, e) => `https://multiembed.mov/directstream.php?imdb_id=${id}&s=${s}&e=${e}`,
+    name: 'superembed',
+    movieUrl: (imdb, tmdb) => `https://multiembed.mov/directstream.php?video_id=${imdb}`,
+    tvUrl: (imdb, tmdb, s, e) => `https://multiembed.mov/directstream.php?video_id=${imdb}&s=${s}&e=${e}`,
     referer: 'https://multiembed.mov',
   },
 ];
@@ -152,12 +159,13 @@ export default {
     // GET /extract?imdb=tt1234567&type=tv&season=1&episode=1
     if (url.pathname === '/extract') {
       const imdbId = url.searchParams.get('imdb');
+      const tmdbId = url.searchParams.get('tmdb') || '';
       const type = url.searchParams.get('type') || 'movie';
       const season = url.searchParams.get('season') || '1';
       const episode = url.searchParams.get('episode') || '1';
 
-      if (!imdbId) {
-        return new Response(JSON.stringify({ error: 'imdb param required' }), {
+      if (!imdbId && !tmdbId) {
+        return new Response(JSON.stringify({ error: 'imdb or tmdb param required' }), {
           status: 400, headers: corsHeaders,
         });
       }
@@ -165,8 +173,8 @@ export default {
       // Try providers in order (waterfall)
       for (const provider of PROVIDERS) {
         const embedUrl = type === 'tv'
-          ? provider.tvUrl(imdbId, season, episode)
-          : provider.movieUrl(imdbId);
+          ? provider.tvUrl(imdbId, tmdbId, season, episode)
+          : provider.movieUrl(imdbId, tmdbId);
 
         const result = await fetchProvider(provider, embedUrl);
         if (result) {
@@ -222,13 +230,46 @@ export default {
       }
     }
 
+    // ══════════════════════════════════════════════════════════════════════════
+    // AtmosIndex — Telegram Content Discovery
+    // ══════════════════════════════════════════════════════════════════════════
+
+    // GET /tg/search?title=X&year=Y&s=1&e=3&quality=1080p
+    if (url.pathname === '/tg/search') {
+      return handleSearch(url, env);
+    }
+
+    // GET /tg/season?title=X&s=1
+    if (url.pathname === '/tg/season') {
+      return handleSeasonSearch(url, env);
+    }
+
+    // GET /tg/stats — catalog size, channel count
+    if (url.pathname === '/tg/stats') {
+      return handleStats(env);
+    }
+
+    // POST /tg/crawl — manual trigger (for testing)
+    if (url.pathname === '/tg/crawl' && request.method === 'POST') {
+      ctx.waitUntil(runCrawl(env));
+      return new Response(JSON.stringify({ status: 'crawl_started' }), {
+        headers: corsHeaders,
+      });
+    }
+
     // Health check
     if (url.pathname === '/health') {
-      return new Response(JSON.stringify({ status: 'ok', providers: PROVIDERS.length }), {
+      return new Response(JSON.stringify({ status: 'ok', providers: PROVIDERS.length, engine: 'atmos-index' }), {
         headers: corsHeaders,
       });
     }
 
     return new Response('Not Found', { status: 404 });
+  },
+
+  // Cron handler — runs every 6 hours to crawl channels
+  async scheduled(controller, env, ctx) {
+    console.log(`[Cron] Triggered at ${new Date().toISOString()} — cron: ${controller.cron}`);
+    await runCrawl(env);
   },
 };

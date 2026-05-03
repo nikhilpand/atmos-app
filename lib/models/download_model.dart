@@ -11,7 +11,7 @@ enum DownloadStatus {
   @HiveField(1)
   searching,   // fetching magnet from YTS/EZTV
   @HiveField(2)
-  downloading, // active torrent download
+  downloading, // active download
   @HiveField(3)
   converting,  // ffmpeg mux
   @HiveField(4)
@@ -57,7 +57,7 @@ class QualityOption extends HiveObject {
     this.type,
     this.videoCodec,
     this.audioChannels,
-    this.source = 'torrent',
+    this.source = 'telegram',
     this.seeders = 0,
     this.telegramFileId,
     this.channelName,
@@ -128,7 +128,7 @@ class DownloadTask extends HiveObject {
     this.videoCodec,
     this.downloadedBytes = 0,
     this.imdbId = '',
-    this.source = 'torrent',
+    this.source = 'telegram',
     this.telegramFileId,
     this.downloadSpeed = 0,
   });

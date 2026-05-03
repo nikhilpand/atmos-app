@@ -46,8 +46,7 @@ dependencies:
   flutter_inappwebview: ^6.1.5
 
   # ─── Download Engine ──────────────────────────────────────────────────────
-  # In-app torrent engine (libtorrent 2.0 via FFI — same engine as qBittorrent)
-  libtorrent_flutter: ^1.8.2
+  # Torrent engine removed — Telegram CDN is the sole download source now
 
   # Storage permissions (Android 11+)
   permission_handler: ^11.3.1
