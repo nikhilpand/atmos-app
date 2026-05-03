@@ -173,6 +173,7 @@ async function queryDirectBot(client, botUsername, query) {
             audio: parsed.audio,
             isSeasonPack: false,
             source: `@${botUsername}`,
+            searchQuery: query,
           });
         }
       }
@@ -316,7 +317,6 @@ function deduplicateAndRank(allResults, title, seasonNum) {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
-// ═══════════════════════════════════════════════════════════════════════════════
 // CHANNEL DISCOVERY — fallback when bots return thin results
 // ═══════════════════════════════════════════════════════════════════════════════
 
@@ -402,6 +402,7 @@ async function discoverAndSearchChannels(client, title, seasonNum) {
               quality: parsed.quality, codec: parsed.codec, audio: parsed.audio,
               isSeasonPack: parsed.isSeasonPack, source: `@${ch.username}`,
               link: `https://t.me/${ch.username}/${msg.id}`,
+              searchQuery: title,
             });
           }
         } catch (_) {}
@@ -607,8 +608,17 @@ async function main() {
             offset: '',
           }));
 
-          // Find matching result
-          const match = inlineResult.results?.find(ir => ir.id === r.inlineResultId);
+          // Match by ID first, then by description, then first result
+          let match = inlineResult.results?.find(ir => ir.id === r.inlineResultId);
+          if (!match && r.description) {
+            const targetDesc = normalize(r.description).substring(0, 30);
+            match = inlineResult.results?.find(ir =>
+              normalize(ir.description || '').includes(targetDesc)
+            );
+          }
+          if (!match && inlineResult.results?.length > 0) {
+            match = inlineResult.results[0];
+          }
           if (match) {
             await client.invoke(new Api.messages.SendInlineBotResult({
               peer: new Api.InputPeerSelf(),
@@ -617,6 +627,8 @@ async function main() {
               randomId: BigInt(Math.floor(Math.random() * 1e18)),
             }));
             console.log(`  ✅ E${String(ep).padStart(2, '0')} → Saved Messages`);
+          } else {
+            console.log(`  ⚠️  E${String(ep).padStart(2, '0')}: no match found`);
           }
         } catch (e) {
           console.log(`  ❌ E${String(ep).padStart(2, '0')}: ${e.message.substring(0, 50)}`);
@@ -713,6 +725,20 @@ async function main() {
   const inlineResults = (await Promise.all([...inlinePromises, ...broadPromises])).flat();
   console.log(`    Total: ${inlineResults.length} inline results`);
   allResults.push(...inlineResults);
+
+  // ── Phase 1.5: Genre-specific bots if results are thin ──
+  if (inlineResults.length < 10) {
+    const isAnime = /anime|hero|naruto|one piece|dragon ball|jujutsu|demon slayer|attack on titan/i.test(title);
+    const extraBots = isAnime ? ANIME_BOTS : MOVIE_BOTS;
+    console.log(`  🎯 Trying ${extraBots.length} genre-specific bots...`);
+    const extraPromises = extraBots.map(async bot => {
+      const r = await queryInlineBot(client, bot, searchQuery);
+      if (r.length > 0) console.log(`    @${bot}: ${r.length} results`);
+      return r;
+    });
+    const extraResults = (await Promise.all(extraPromises)).flat();
+    allResults.push(...extraResults);
+  }
 
   // ── Phase 2: Direct bots (callback buttons) ──
   console.log(`\n  🤖 Querying ${DIRECT_BOTS.length} direct bots...`);
