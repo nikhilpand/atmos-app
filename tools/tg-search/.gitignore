@@ -1,0 +1,4 @@
+node_modules/
+session.txt
+config.json
+last_results.json
