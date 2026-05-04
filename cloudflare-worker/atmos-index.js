@@ -259,6 +259,24 @@ function fuzzyMatch(query, candidate) {
   return words.every(w => candidate.includes(w));
 }
 
+// ── Junk filter — blocks non-media rows from polluting catalog ──────────────
+
+const JUNK_PATTERNS = [
+  /^#/,                                      // hashtag-only (channel promo posts)
+  /join\s+(us|our|here|channel)/i,           // "Join our channel"
+  /t\.me\//i,                                // inline Telegram links
+  /subscribe/i,
+  /forward/i,
+  /^[\s\d.\-_]+$/,                           // numbers/punctuation only
+  /\.(pdf|txt|zip|rar|jpg|png|gif|webp)$/i, // non-video file types
+];
+
+function isJunk(title, fileName) {
+  const text = `${title || ''} ${fileName || ''}`.trim();
+  if (!text || text.length < 3) return true;
+  return JUNK_PATTERNS.some(p => p.test(text));
+}
+
 // ── Crawler ─────────────────────────────────────────────────────────────────
 
 export async function runCrawl(env) {
@@ -345,7 +363,10 @@ async function crawlChannel(channel, env) {
       const rows = [];
       for (const msg of messages) {
         const info = parseFilename(msg.parseName);
-        if (!info.title || info.title.length < 2) continue;
+
+        // Skip junk rows (promos, PDFs, join links, etc.)
+        if (isJunk(info.title, msg.fileName)) continue;
+        if (!info.title || info.title.length < 3) continue;
 
         rows.push({
           channel_username: username,

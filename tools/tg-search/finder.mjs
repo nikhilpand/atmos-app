@@ -437,41 +437,67 @@ async function indexToSupabase(results) {
     return;
   }
 
-  // Include any result that has a usable identifier (fileName, description, or title)
-  const rows = results.filter(r => r.fileName || r.description || r.title).map(r => ({
-    channel_username: r.source?.replace('@', '') || r.botUsername || '',
-    msg_id: r.messageId || 0,
-    title: r.title || r.fileName,
-    title_normalized: normalize(r.title || r.fileName),
-    season: r.season,
-    episode: r.episode,
-    quality: r.quality,
-    codec: r.codec,
-    audio: r.audio,
-    file_size_bytes: r.sizeBytes,
-    file_name: r.fileName,
-    is_season_pack: r.isSeasonPack || false,
-  }));
-
-  if (rows.length === 0) return;
-
-  const resp = await fetch(`${vars.SUPABASE_URL}/rest/v1/tg_media`, {
-    method: 'POST',
-    headers: {
-      'apikey': vars.SUPABASE_ANON_KEY,
-      'Authorization': `Bearer ${vars.SUPABASE_ANON_KEY}`,
-      'Content-Type': 'application/json',
-      'Prefer': 'resolution=merge-duplicates',
-    },
-    body: JSON.stringify(rows),
-  });
-
-  if (resp.ok) {
-    console.log(`\n✅ Indexed ${rows.length} results to Supabase catalog`);
-  } else {
-    const body = await resp.text();
-    console.log(`⚠️  Supabase index failed: ${resp.status} ${body.substring(0, 100)}`);
+  // Build a stable msg_id for inline bot results (which have no real message ID).
+  // Use a simple string hash so the same file from the same bot gets the same ID.
+  function stableId(r) {
+    if (r.messageId && r.messageId !== 0) return r.messageId;
+    // Synthetic: hash of botUsername + inlineResultId + title
+    const key = `${r.botUsername || ''}:${r.inlineResultId || ''}:${r.title || r.fileName || ''}`;
+    let h = 0;
+    for (let i = 0; i < key.length; i++) h = Math.imul(31, h) + key.charCodeAt(i) | 0;
+    // Keep positive and shift to avoid collision with real msg IDs (which are < 2^31)
+    return Math.abs(h) + 2_000_000_000;
   }
+
+  // Only index results that have enough info to be useful
+  const rows = results
+    .filter(r => (r.fileName || r.description || r.title) && (r.botUsername || r.source))
+    .map(r => ({
+      channel_username: (r.source?.replace('@', '') || r.botUsername || 'unknown'),
+      msg_id: stableId(r),
+      title: r.title || r.fileName || r.description || '',
+      title_normalized: normalize(r.title || r.fileName || r.description || ''),
+      season: r.season ?? null,
+      episode: r.episode ?? null,
+      quality: r.quality || 'HD',
+      codec: r.codec || null,
+      audio: r.audio || null,
+      file_size_bytes: r.sizeBytes || 0,
+      file_name: r.fileName || r.description || '',
+      is_season_pack: r.isSeasonPack || false,
+    }));
+
+  if (rows.length === 0) {
+    console.log('\n⚠️  No indexable results (missing source/bot info)');
+    return;
+  }
+
+  // Batch insert in groups of 20 (avoids oversized payloads + shows progress)
+  const BATCH = 20;
+  let indexed = 0;
+  for (let i = 0; i < rows.length; i += BATCH) {
+    const batch = rows.slice(i, i + BATCH);
+    const resp = await fetch(`${vars.SUPABASE_URL}/rest/v1/tg_media`, {
+      method: 'POST',
+      headers: {
+        'apikey': vars.SUPABASE_ANON_KEY,
+        'Authorization': `Bearer ${vars.SUPABASE_ANON_KEY}`,
+        'Content-Type': 'application/json',
+        'Prefer': 'resolution=merge-duplicates,return=minimal',
+      },
+      body: JSON.stringify(batch),
+    });
+
+    if (resp.ok || resp.status === 201) {
+      indexed += batch.length;
+    } else {
+      const body = await resp.text();
+      console.log(`  ⚠️  Batch ${i/BATCH + 1} failed: ${resp.status} ${body.substring(0, 80)}`);
+    }
+    await sleep(100);
+  }
+
+  console.log(`\n✅ Indexed ${indexed}/${rows.length} results → Supabase catalog`);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
