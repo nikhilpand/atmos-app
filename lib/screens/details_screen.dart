@@ -922,7 +922,7 @@ class _EpisodesSection extends ConsumerWidget {
                       title: '${details.title} S${selectedSeason.toString().padLeft(2, "0")}E${ep.episodeNumber.toString().padLeft(2, "0")}',
                       onSelect: (q) {
                         ref.read(downloadServiceProvider).startDownload(
-                          tmdbId: details.id, imdbId: imdbId, title: details.title,
+                          tmdbId: details.id, imdbId: details.imdbId ?? '', title: details.title,
                           mediaType: 'tv', quality: q, season: selectedSeason,
                           episode: ep.episodeNumber, episodeName: ep.name,
                           posterPath: details.posterPath,

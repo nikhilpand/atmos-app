@@ -253,6 +253,7 @@ async function globalSearch(client, query) {
         audio: parsed.audio,
         isSeasonPack: parsed.isSeasonPack,
         source,
+        searchQuery: query,  // needed by --get/--get-all
         link: source.startsWith('@')
           ? `https://t.me/${source.slice(1)}/${msg.id}`
           : `tg://msg?id=${msg.id}`,
@@ -436,7 +437,8 @@ async function indexToSupabase(results) {
     return;
   }
 
-  const rows = results.filter(r => r.fileName).map(r => ({
+  // Include any result that has a usable identifier (fileName, description, or title)
+  const rows = results.filter(r => r.fileName || r.description || r.title).map(r => ({
     channel_username: r.source?.replace('@', '') || r.botUsername || '',
     msg_id: r.messageId || 0,
     title: r.title || r.fileName,
