@@ -769,14 +769,23 @@ class _EpisodesSection extends ConsumerWidget {
         children: [
           Divider(color: Theme.of(context).colorScheme.outlineVariant),
           const SizedBox(height: 16),
-          // Season picker
-          Text(
-            'Episodes',
-            style: TextStyle(
-              fontSize: isTv ? 22 : 18,
-              fontWeight: FontWeight.w700,
-              color: Theme.of(context).colorScheme.onSurface,
-            ),
+          // Season header + Download Season button
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'Episodes',
+                style: TextStyle(
+                  fontSize: isTv ? 22 : 18,
+                  fontWeight: FontWeight.w700,
+                  color: Theme.of(context).colorScheme.onSurface,
+                ),
+              ),
+              _DownloadSeasonButton(
+                details: details,
+                selectedSeason: selectedSeason,
+              ),
+            ],
           ),
           const SizedBox(height: 12),
           // Season selector
@@ -937,6 +946,180 @@ class _EpisodesSection extends ConsumerWidget {
         ],
       ),
     );
+  }
+}
+
+// ─── Download Season Button ──────────────────────────────────────────────────
+
+class _DownloadSeasonButton extends ConsumerStatefulWidget {
+  final TmdbDetails details;
+  final int selectedSeason;
+
+  const _DownloadSeasonButton({
+    required this.details,
+    required this.selectedSeason,
+  });
+
+  @override
+  ConsumerState<_DownloadSeasonButton> createState() =>
+      _DownloadSeasonButtonState();
+}
+
+class _DownloadSeasonButtonState extends ConsumerState<_DownloadSeasonButton> {
+  bool _loading = false;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+
+    return AnimatedSwitcher(
+      duration: const Duration(milliseconds: 200),
+      child: _loading
+          ? SizedBox(
+              width: 20,
+              height: 20,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: cs.primary,
+              ),
+            )
+          : Material(
+              color: Colors.transparent,
+              child: InkWell(
+                borderRadius: BorderRadius.circular(20),
+                onTap: _onTap,
+                child: Container(
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                      color: cs.primary.withOpacity(0.5),
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(Icons.download_rounded, size: 16, color: cs.primary),
+                      const SizedBox(width: 4),
+                      Text(
+                        'Season',
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: cs.primary,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+    );
+  }
+
+  Future<void> _onTap() async {
+    final telegram = ref.read(telegramServiceProvider);
+    if (!telegram.isLoggedIn) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Log in to Telegram in Settings to download'),
+        ),
+      );
+      return;
+    }
+
+    // Get episode count for the selected season
+    final selectedSeason = widget.selectedSeason;
+    final seasonMeta = widget.details.seasons.firstWhere(
+      (s) => s.seasonNumber == selectedSeason,
+      orElse: () => widget.details.seasons.first,
+    );
+    final episodeCount = seasonMeta.episodeCount;
+
+    // Confirmation dialog
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: Theme.of(ctx).colorScheme.surfaceContainerHigh,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text(
+          'Download Season $selectedSeason',
+          style: const TextStyle(fontWeight: FontWeight.w700),
+        ),
+        content: Text(
+          'Download all $episodeCount episodes of '
+          '${widget.details.title} Season $selectedSeason?\n\n'
+          'Already downloaded episodes will be skipped.',
+          style: TextStyle(
+            color: Theme.of(ctx).colorScheme.onSurfaceVariant,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('Download'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true || !mounted) return;
+
+    setState(() => _loading = true);
+
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            'Searching for Season $selectedSeason episodes...',
+          ),
+          duration: const Duration(seconds: 2),
+        ),
+      );
+    }
+
+    try {
+      final dl = ref.read(downloadServiceProvider);
+      final tasks = await dl.downloadSeason(
+        tmdbId: widget.details.id,
+        imdbId: widget.details.imdbId ?? '',
+        title: widget.details.title,
+        season: selectedSeason,
+        totalEpisodes: episodeCount,
+        posterPath: widget.details.posterPath,
+      );
+
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(
+            tasks.isEmpty
+                ? 'No episodes found in catalog for Season $selectedSeason'
+                : '${tasks.length}/$episodeCount episodes queued for download ⚡',
+          ),
+          duration: const Duration(seconds: 3),
+          behavior: SnackBarBehavior.floating,
+          backgroundColor:
+              tasks.isEmpty ? Colors.orange : Theme.of(context).colorScheme.primary,
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Season download failed: $e'),
+          backgroundColor: Colors.red,
+        ),
+      );
+    } finally {
+      if (mounted) setState(() => _loading = false);
+    }
   }
 }
 
