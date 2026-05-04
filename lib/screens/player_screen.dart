@@ -122,6 +122,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
   bool _hasAdvanced = false;
 
+  bool _controlsVisible = true;
+  Timer? _controlsTimer;
+  bool _isPlaying = true;
+  String? _seekFeedback;
+  Timer? _feedbackTimer;
+
   // Args — tmdbId is primary, imdbId is fallback
   String get _title => widget.args['title'] as String? ?? 'Untitled';
   String get _type => widget.args['type'] as String? ?? 'movie';
@@ -134,6 +140,57 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     return widget.args['imdbId'] as String? ?? '0';
   }
 
+  void _showControls() {
+    if (mounted) setState(() => _controlsVisible = true);
+    _controlsTimer?.cancel();
+    _controlsTimer = Timer(const Duration(seconds: 4), () {
+      if (mounted) setState(() => _controlsVisible = false);
+    });
+  }
+
+  void _toggleControls() {
+    if (_controlsVisible) {
+      if (mounted) setState(() => _controlsVisible = false);
+      _controlsTimer?.cancel();
+    } else {
+      _showControls();
+    }
+  }
+
+  void _togglePlayPause() {
+    _wv?.evaluateJavascript(source: '''
+      (function() {
+        const v = document.querySelector('video');
+        if (v) {
+          if (v.paused) v.play();
+          else v.pause();
+        }
+      })();
+    ''');
+    _showControls();
+  }
+
+  void _seek(int seconds) {
+    _wv?.evaluateJavascript(source: '''
+      (function() {
+        const v = document.querySelector('video');
+        if (v) {
+          v.currentTime += $seconds;
+        }
+      })();
+    ''');
+    _showFeedback(seconds > 0 ? 'forward' : 'backward');
+    _showControls();
+  }
+
+  void _showFeedback(String type) {
+    if (mounted) setState(() => _seekFeedback = type);
+    _feedbackTimer?.cancel();
+    _feedbackTimer = Timer(const Duration(milliseconds: 800), () {
+      if (mounted) setState(() => _seekFeedback = null);
+    });
+  }
+
   @override
   void initState() {
     super.initState();
@@ -143,6 +200,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       DeviceOrientation.landscapeRight,
     ]);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    _showControls();
   }
 
   @override
@@ -150,6 +208,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     _errorTimeout?.cancel();
+    _controlsTimer?.cancel();
+    _feedbackTimer?.cancel();
     super.dispose();
   }
 
@@ -336,7 +396,27 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     return PopScope(
       // Handle Android back button
       canPop: true,
-      child: Scaffold(
+      child: Focus(
+        autofocus: true,
+        onKeyEvent: (node, event) {
+          if (event is KeyDownEvent) {
+            final key = event.logicalKey;
+            if (key == LogicalKeyboardKey.select || key == LogicalKeyboardKey.enter || key == LogicalKeyboardKey.mediaPlayPause) {
+              _togglePlayPause();
+              return KeyEventResult.handled;
+            }
+            if (key == LogicalKeyboardKey.arrowRight) {
+              _seek(10);
+              return KeyEventResult.handled;
+            }
+            if (key == LogicalKeyboardKey.arrowLeft) {
+              _seek(-10);
+              return KeyEventResult.handled;
+            }
+          }
+          return KeyEventResult.ignored;
+        },
+        child: Scaffold(
         backgroundColor: Colors.black,
         body: Stack(
           children: [
@@ -411,6 +491,26 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                       }
                     },
                   );
+                  c.addJavaScriptHandler(
+                    handlerName: 'video_state',
+                    callback: (args) {
+                      if (args.isEmpty) return;
+                      final isPaused = args[0] as bool;
+                      if (mounted && _isPlaying == isPaused) {
+                        setState(() => _isPlaying = !isPaused);
+                      }
+                    },
+                  );
+                  c.addJavaScriptHandler(
+                    handlerName: 'single_tap',
+                    callback: (_) => _toggleControls(),
+                  );
+                  c.addJavaScriptHandler(
+                    handlerName: 'show_feedback',
+                    callback: (args) {
+                      if (args.isNotEmpty) _showFeedback(args[0].toString());
+                    },
+                  );
                 },
 
                 onLoadStop: (_, __) async {
@@ -418,7 +518,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                   if (mounted) setState(() => _pageLoaded = true);
                   try {
                     await _wv?.evaluateJavascript(source: _protectionJs);
-                    // Inject progress tracker
+                    // Inject progress tracker and event listeners
                     await _wv?.evaluateJavascript(source: '''
                       setInterval(() => {
                         const video = document.querySelector('video');
@@ -426,6 +526,40 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                           window.flutter_inappwebview.callHandler('video_progress', video.currentTime, video.duration);
                         }
                       }, 5000);
+                      
+                      let attached = false;
+                      setInterval(() => {
+                        const video = document.querySelector('video');
+                        if (video && !attached) {
+                          attached = true;
+                          video.addEventListener('play', () => window.flutter_inappwebview.callHandler('video_state', false));
+                          video.addEventListener('pause', () => window.flutter_inappwebview.callHandler('video_state', true));
+                          window.flutter_inappwebview.callHandler('video_state', video.paused);
+                        }
+                      }, 1000);
+                      
+                      let lastTap = 0;
+                      document.addEventListener('click', function(e) {
+                        let currentTime = new Date().getTime();
+                        let tapLength = currentTime - lastTap;
+                        if (tapLength < 400 && tapLength > 0) {
+                          const video = document.querySelector('video');
+                          if (video) {
+                            if (e.clientX > window.innerWidth / 2) {
+                              video.currentTime += 10;
+                              window.flutter_inappwebview.callHandler('show_feedback', 'forward');
+                            } else {
+                              video.currentTime -= 10;
+                              window.flutter_inappwebview.callHandler('show_feedback', 'backward');
+                            }
+                          }
+                          e.preventDefault();
+                          lastTap = 0;
+                        } else {
+                          window.flutter_inappwebview.callHandler('single_tap');
+                          lastTap = currentTime;
+                        }
+                      });
                     ''');
                   } catch (_) {}
                 },
@@ -550,9 +684,77 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             // TOP BAR — minimal, non-blocking
             // Uses SafeArea + positioned at top, small height
             // ═══════════════════════════════════════════════════════
+            // ═══════════════════════════════════════════════════════
+            // SEEK FEEDBACK (Double tap)
+            // ═══════════════════════════════════════════════════════
+            if (_seekFeedback != null)
+              Positioned.fill(
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Container(
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          gradient: _seekFeedback == 'backward' 
+                              ? const LinearGradient(colors: [Colors.white12, Colors.transparent])
+                              : null,
+                        ),
+                        child: _seekFeedback == 'backward' 
+                            ? const Icon(Icons.fast_rewind_rounded, color: Colors.white, size: 60)
+                            : null,
+                      ),
+                    ),
+                    Expanded(
+                      child: Container(
+                        alignment: Alignment.center,
+                        decoration: BoxDecoration(
+                          gradient: _seekFeedback == 'forward' 
+                              ? const LinearGradient(colors: [Colors.transparent, Colors.white12])
+                              : null,
+                        ),
+                        child: _seekFeedback == 'forward' 
+                            ? const Icon(Icons.fast_forward_rounded, color: Colors.white, size: 60)
+                            : null,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+
+            // ═══════════════════════════════════════════════════════
+            // CENTER PLAY/PAUSE CONTROLS
+            // ═══════════════════════════════════════════════════════
+            if (_controlsVisible)
+              Positioned.fill(
+                child: IgnorePointer(
+                  ignoring: true, // Only the gesture detector handles the tap
+                  child: Center(
+                    child: IgnorePointer(
+                      ignoring: false,
+                      child: GestureDetector(
+                        onTap: _togglePlayPause,
+                        child: Container(
+                          decoration: const BoxDecoration(
+                            color: Colors.black54,
+                            shape: BoxShape.circle,
+                          ),
+                          padding: const EdgeInsets.all(16),
+                          child: Icon(
+                            _isPlaying ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                            color: Colors.white,
+                            size: 48,
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+
             Positioned(
               top: 0, left: 0, right: 0,
               child: _TopBar(
+                visible: _controlsVisible,
                 title: _title,
                 type: _type,
                 season: _season,
@@ -572,15 +774,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           ],
         ),
       ),
-    );
+    ));
   }
 }
 
 // ─── Top Bar Widget ───────────────────────────────────────────────────────────
-// Tappable header that auto-hides after 4s. Tap anywhere on it to keep visible.
-// Uses IgnorePointer(ignoring: true) when hidden so WebView gets all touches.
+// Header that shows/hides with controls. Uses IgnorePointer when hidden.
 
-class _TopBar extends StatefulWidget {
+class _TopBar extends StatelessWidget {
+  final bool visible;
   final String title, type, provName;
   final int season, episode, provIndex, provTotal;
   final String? episodeName;
@@ -588,6 +790,7 @@ class _TopBar extends StatefulWidget {
   final VoidCallback onBack, onPrev, onNext, onPickSource, onSubtitles;
 
   const _TopBar({
+    required this.visible,
     required this.title, required this.type, required this.season,
     required this.episode, this.episodeName, required this.provName,
     required this.provIndex, required this.provTotal,
@@ -597,124 +800,88 @@ class _TopBar extends StatefulWidget {
   });
 
   @override
-  State<_TopBar> createState() => _TopBarState();
-}
-
-class _TopBarState extends State<_TopBar> {
-  bool _visible = true;
-  Timer? _timer;
-
-  @override
-  void initState() {
-    super.initState();
-    _startHide();
-  }
-
-  @override
-  void dispose() {
-    _timer?.cancel();
-    super.dispose();
-  }
-
-  void _startHide() {
-    _timer?.cancel();
-    _timer = Timer(const Duration(seconds: 4), () {
-      if (mounted) setState(() => _visible = false);
-    });
-  }
-
-  void _toggle() {
-    setState(() => _visible = !_visible);
-    if (_visible) _startHide();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: _toggle,
-      behavior: HitTestBehavior.opaque,
-      child: IgnorePointer(
-        ignoring: !_visible,
-        child: AnimatedOpacity(
-          opacity: _visible ? 1.0 : 0.0,
-          duration: const Duration(milliseconds: 250),
-          child: Container(
-            padding: EdgeInsets.only(
-              top: MediaQuery.of(context).padding.top + 4,
-              left: 4, right: 4, bottom: 8,
-            ),
-            decoration: const BoxDecoration(
-              gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: [Color(0xEE000000), Colors.transparent],
-              ),
-            ),
-            child: Row(children: [
-              IconButton(
-                onPressed: widget.onBack,
-                icon: const Icon(Icons.arrow_back_ios_new_rounded,
-                    color: Colors.white, size: 20),
-              ),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(widget.title,
-                        style: const TextStyle(color: Colors.white,
-                            fontSize: 14, fontWeight: FontWeight.w600),
-                        overflow: TextOverflow.ellipsis),
-                    if (widget.type == 'tv')
-                      Text(
-                        'S${widget.season.toString().padLeft(2, '0')}'
-                        'E${widget.episode.toString().padLeft(2, '0')}'
-                        '${widget.episodeName != null ? ' — ${widget.episodeName}' : ''}',
-                        style: const TextStyle(color: Colors.white60, fontSize: 11),
-                      ),
-                  ],
-                ),
-              ),
-              IconButton(
-                onPressed: widget.onPrev,
-                icon: const Icon(Icons.skip_previous_rounded,
-                    color: Colors.white70, size: 22),
-              ),
-              GestureDetector(
-                onTap: widget.onPickSource,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: Theme.of(context).colorScheme.primary.withOpacity(0.3),
-                    borderRadius: BorderRadius.circular(6),
-                    border: Border.all(color: Theme.of(context).colorScheme.primary.withOpacity(0.5)),
-                  ),
-                  child: Text(
-                    '${widget.provIndex + 1}/${widget.provTotal}  ${widget.provName}',
-                    style: const TextStyle(color: Colors.white,
-                        fontSize: 11, fontWeight: FontWeight.w600),
-                  ),
-                ),
-              ),
-              IconButton(
-                onPressed: widget.onNext,
-                icon: const Icon(Icons.skip_next_rounded,
-                    color: Colors.white70, size: 22),
-              ),
-              // Subtitle toggle button
-              IconButton(
-                onPressed: widget.onSubtitles,
-                tooltip: 'Subtitles',
-                icon: Icon(
-                  Icons.subtitles_rounded,
-                  color: widget.subtitlesEnabled
-                      ? Colors.white
-                      : Colors.white38,
-                  size: 22,
-                ),
-              ),
-            ]),
+    return IgnorePointer(
+      ignoring: !visible,
+      child: AnimatedOpacity(
+        opacity: visible ? 1.0 : 0.0,
+        duration: const Duration(milliseconds: 250),
+        child: Container(
+          padding: EdgeInsets.only(
+            top: MediaQuery.of(context).padding.top + 4,
+            left: 4, right: 4, bottom: 8,
           ),
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topCenter,
+              end: Alignment.bottomCenter,
+              colors: [Color(0xEE000000), Colors.transparent],
+            ),
+          ),
+          child: Row(children: [
+            IconButton(
+              onPressed: onBack,
+              icon: const Icon(Icons.arrow_back_ios_new_rounded,
+                  color: Colors.white, size: 20),
+            ),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(title,
+                      style: const TextStyle(color: Colors.white,
+                          fontSize: 14, fontWeight: FontWeight.w600),
+                      overflow: TextOverflow.ellipsis),
+                  if (type == 'tv')
+                    Text(
+                      'S${season.toString().padLeft(2, '0')}'
+                      'E${episode.toString().padLeft(2, '0')}'
+                      '${episodeName != null ? ' — $episodeName' : ''}',
+                      style: const TextStyle(color: Colors.white60, fontSize: 11),
+                    ),
+                ],
+              ),
+            ),
+            IconButton(
+              onPressed: onPrev,
+              icon: const Icon(Icons.skip_previous_rounded,
+                  color: Colors.white70, size: 22),
+            ),
+            GestureDetector(
+              onTap: onPickSource,
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Theme.of(context).colorScheme.primary.withOpacity(0.3),
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: Theme.of(context).colorScheme.primary.withOpacity(0.5)),
+                ),
+                child: Text(
+                  '${provIndex + 1}/$provTotal  $provName',
+                  style: const TextStyle(color: Colors.white,
+                      fontSize: 11, fontWeight: FontWeight.w600),
+                ),
+              ),
+            ),
+            IconButton(
+              onPressed: onNext,
+              icon: const Icon(Icons.skip_next_rounded,
+                  color: Colors.white70, size: 22),
+            ),
+            // Subtitle toggle button
+            IconButton(
+              onPressed: onSubtitles,
+              tooltip: 'Subtitles',
+              icon: Icon(
+                Icons.subtitles_rounded,
+                color: subtitlesEnabled
+                    ? Colors.white
+                    : Colors.white38,
+                size: 22,
+              ),
+            ),
+          ]),
         ),
       ),
     );

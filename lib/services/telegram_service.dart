@@ -551,7 +551,7 @@ class TelegramService extends ChangeNotifier {
           apiId: int.tryParse(dotenv.env['TELEGRAM_API_ID'] ?? '') ?? 0,
           apiHash: dotenv.env['TELEGRAM_API_HASH'] ?? '',
           databaseDirectory: '$_tdLibPath/db',
-          filesDirectory: '$_tdLibPath/files',
+          filesDirectory: '/storage/emulated/0/Download/Atmos',
           useTestDc: false,
           useSecretChats: false,
           useMessageDatabase: true,

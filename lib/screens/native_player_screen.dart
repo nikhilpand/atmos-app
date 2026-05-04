@@ -19,7 +19,7 @@ List<(String, String)> _buildSourceList(
   final tvSources = [
     ('VidSrc.me', 'https://vidsrc.me/embed/tv?imdb=$imdbId&season=$season&episode=$episode'),
     ('Videasy', 'https://player.videasy.net/tv/$imdbId/$season/$episode'),
-    ('VidAPI', 'https://vaplayer.ru/embed/tv/$tmdbId/$season/$episode'),
+    ('VidAPI', 'https://vaplayer.ru/embed/tv/$imdbId/$season/$episode'),
     ('VidLink', 'https://vidlink.pro/tv/$tmdbId/$season/$episode'),
     ('VidSrc ICU', 'https://vidsrc.icu/embed/tv/$imdbId/$season/$episode'),
     ('VidSrc Dev', 'https://vidsrc.dev/embed/tv/$imdbId/$season/$episode'),

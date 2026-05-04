@@ -113,8 +113,10 @@ void main() async {
 
 Future<void> _requestPermissions() async {
   try {
+    await Permission.notification.request();
+    await Permission.storage.request();
     if (await Permission.manageExternalStorage.isGranted == false) {
-      await Permission.storage.request();
+      await Permission.manageExternalStorage.request();
     }
   } catch (_) {}
 }

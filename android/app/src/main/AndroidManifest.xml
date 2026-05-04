@@ -24,6 +24,14 @@
         android:name="android.software.leanback"
         android:required="false" />
 
+    <!-- Queries for Package Installer (Required for Android 11+ to install APKs) -->
+    <queries>
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:mimeType="application/vnd.android.package-archive" />
+        </intent>
+    </queries>
+
     <application
         android:label="Atmos"
         android:name="${applicationName}"
