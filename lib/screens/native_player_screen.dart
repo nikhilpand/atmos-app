@@ -114,14 +114,35 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
   Future<void> _startExtraction() async {
     setState(() {
       _state = _ExState.extracting;
-      _statusMsg = 'Scanning providers…';
+      _statusMsg = 'Connecting to server…';
       _providerBadge = '';
       _hasAdvanced = false;
     });
 
-    final sources = _buildSourceList(_type, _imdbId, _tmdbId, _season, _episode);
     debugPrint('[NativePlayer] type=$_type imdbId=$_imdbId tmdbId=$_tmdbId S$_season E$_episode');
 
+    // ── Step 1: Try Cloudflare Worker API (fast, ~2s) ──
+    if (mounted) setState(() => _statusMsg = 'Resolving via server…');
+
+    final workerStream = await _extractor.extractViaWorker(
+      imdbId: _imdbId,
+      tmdbId: _tmdbId,
+      type: _type,
+      season: _season,
+      episode: _episode,
+    );
+
+    if (!mounted) return;
+
+    if (workerStream != null) {
+      _playStream(workerStream);
+      return;
+    }
+
+    // ── Step 2: On-device WebView extraction (fallback) ──
+    if (mounted) setState(() => _statusMsg = 'Scanning providers…');
+
+    final sources = _buildSourceList(_type, _imdbId, _tmdbId, _season, _episode);
     final stream = await _extractor.extractBestFrom(
       sources,
       onStatusUpdate: (status) {
@@ -139,6 +160,10 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
       return;
     }
 
+    _playStream(stream);
+  }
+
+  void _playStream(ExtractedStream stream) async {
     setState(() {
       _state = _ExState.playing;
       _statusMsg = 'Playing via ${stream.providerName}';

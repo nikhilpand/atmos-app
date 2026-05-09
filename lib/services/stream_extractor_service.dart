@@ -1,5 +1,6 @@
 import 'dart:async';
-
+import 'dart:convert';
+import 'package:http/http.dart' as http;
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
@@ -270,8 +271,8 @@ class StreamExtractorService {
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15',
   ];
 
-  /// Primary extraction entry point.
-  /// Tries headless WebView extraction with JS hooks and ad-blocking.
+  /// Primary extraction: Worker API → WebView fallback.
+  /// Call this for direct URL extraction from a single provider.
   Future<ExtractedStream?> extract({
     required String url,
     required String providerName,
@@ -285,6 +286,57 @@ class StreamExtractorService {
         _userAgents[i % _userAgents.length],
       );
       if (stream != null) return stream;
+    }
+    return null;
+  }
+
+  /// Worker-first extraction: calls /extract API with media identifiers.
+  /// This is the preferred entry point — faster than WebView extraction.
+  Future<ExtractedStream?> extractViaWorker({
+    required String imdbId,
+    required String tmdbId,
+    required String type,
+    int season = 1,
+    int episode = 1,
+  }) async {
+    final workerUrl = dotenv.env['EXTRACTOR_WORKER_URL'] ?? '';
+    if (workerUrl.isEmpty) return null;
+
+    try {
+      final uri = Uri.parse('$workerUrl/extract').replace(queryParameters: {
+        'imdb': imdbId,
+        'tmdb': tmdbId,
+        'type': type,
+        'season': '$season',
+        'episode': '$episode',
+      });
+
+      debugPrint('[Extractor] ── Calling Worker /extract...');
+      final response = await http.get(uri, headers: {
+        'User-Agent': _userAgents.first,
+      }).timeout(const Duration(seconds: 8));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data['success'] == true && data['url'] != null) {
+          final streamUrl = data['url'] as String;
+          final provider = data['provider'] as String? ?? 'worker';
+          final referer = data['headers']?['Referer'] as String? ?? '';
+
+          debugPrint('[Extractor] ✅ Worker resolved via $provider: $streamUrl');
+          return ExtractedStream(
+            url: streamUrl,
+            headers: {
+              if (referer.isNotEmpty) 'Referer': referer,
+              'User-Agent': _userAgents.first,
+            },
+            providerName: provider,
+          );
+        }
+      }
+      debugPrint('[Extractor] Worker returned no result (${response.statusCode})');
+    } catch (e) {
+      debugPrint('[Extractor] Worker call failed: $e');
     }
     return null;
   }
