@@ -21,7 +21,7 @@ import 'providers/providers.dart';
 import 'screens/home_screen.dart';
 import 'screens/search_screen.dart';
 import 'screens/details_screen.dart';
-import 'screens/player_screen.dart';
+// import 'screens/player_screen.dart'; // DEPRECATED — unified native player
 import 'screens/download_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/genre_screen.dart';
@@ -190,13 +190,14 @@ GoRouter _buildRouter(bool onboardingDone, RecommendationService recService) {
         },
       ),
 
-      // Player (web)
+      // Player (legacy route → redirects to native)
       GoRoute(
         path: '/player',
         parentNavigatorKey: _rootNavigatorKey,
         pageBuilder: (context, state) {
-          final args = (state.extra as Map<String, dynamic>?) ?? const {};
-          return MaterialPage(child: PlayerScreen(args: args));
+          final args = Map<String, dynamic>.from(
+              (state.extra as Map<String, dynamic>?) ?? const {});
+          return MaterialPage(child: NativePlayerScreen(args: args));
         },
       ),
 

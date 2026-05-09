@@ -448,12 +448,9 @@ class _PlayButtonState extends ConsumerState<_PlayButton> {
       };
     }
 
-    // Show player mode picker
+    // Go directly to native player (unified player)
     if (!mounted) return;
-    final route = await _PlayerModeSheet.show(context);
-    if (!mounted || route == null) return;
-
-    context.push(route, extra: baseArgs);
+    context.push('/native-player', extra: baseArgs);
   }
 
   void _onDownload() async {
@@ -852,10 +849,9 @@ class _EpisodesSection extends ConsumerWidget {
                 return EpisodeTile(
                   episode: ep,
                   watchHistory: history,
-                  onTap: () async {
-                    final route = await _PlayerModeSheet.show(context);
-                    if (!context.mounted || route == null) return;
-                    context.push(route, extra: {
+                  onTap: () {
+                    if (!context.mounted) return;
+                    context.push('/native-player', extra: {
                       'imdbId': details.imdbId ?? '',
                       'tmdbId': details.id,
                       'title': details.title,
@@ -1123,154 +1119,6 @@ class _DownloadSeasonButtonState extends ConsumerState<_DownloadSeasonButton> {
   }
 }
 
-// ─── Player Mode Picker Sheet ────────────────────────────────────────────────
+// All playback now routes to /native-player directly.
+// The old _PlayerModeSheet and _ModeCard classes were removed.
 
-class _PlayerModeSheet extends StatelessWidget {
-  const _PlayerModeSheet();
-
-  static Future<String?> show(BuildContext context) {
-    return showModalBottomSheet<String>(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (_) => const _PlayerModeSheet(),
-    );
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return Container(
-      decoration: BoxDecoration(
-        color: cs.surface,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      padding: EdgeInsets.fromLTRB(
-          20, 12, 20, MediaQuery.of(context).padding.bottom + 20),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Center(
-            child: Container(
-              width: 40, height: 4,
-              decoration: BoxDecoration(
-                color: cs.onSurfaceVariant.withOpacity(0.3),
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-          ),
-          const SizedBox(height: 20),
-          Text('Choose Player',
-              style: Theme.of(context).textTheme.titleMedium
-                  ?.copyWith(fontWeight: FontWeight.w700)),
-          const SizedBox(height: 4),
-          Text('How do you want to watch?',
-              style: Theme.of(context).textTheme.bodySmall
-                  ?.copyWith(color: cs.onSurfaceVariant)),
-          const SizedBox(height: 16),
-          _ModeCard(
-            icon: Icons.language_rounded,
-            iconColor: Colors.blueAccent,
-            title: 'Web Player',
-            subtitle: 'Iframe embed — always works',
-            bullets: const ['⚡ Fastest to start', '🛡️ Ads blocked', '🔄 Auto provider fallback'],
-            onTap: () => Navigator.pop(context, '/player'),
-          ),
-          const SizedBox(height: 12),
-          _ModeCard(
-            icon: Icons.play_circle_fill_rounded,
-            iconColor: Colors.deepPurpleAccent,
-            title: 'Native Player',
-            subtitle: 'Hardware decoded · mpv engine',
-            bullets: const ['🔋 Better battery life', '🎞️ True hardware decoding', '🖼️ Picture-in-Picture'],
-            badge: 'BETA',
-            onTap: () => Navigator.pop(context, '/native-player'),
-          ),
-          const SizedBox(height: 8),
-        ],
-      ),
-    );
-  }
-}
-
-class _ModeCard extends StatelessWidget {
-  final IconData icon;
-  final Color iconColor;
-  final String title;
-  final String subtitle;
-  final List<String> bullets;
-  final String? badge;
-  final VoidCallback onTap;
-
-  const _ModeCard({
-    required this.icon, required this.iconColor, required this.title,
-    required this.subtitle, required this.bullets, required this.onTap,
-    this.badge,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final cs = Theme.of(context).colorScheme;
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(16),
-      child: Container(
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: cs.surfaceContainerHigh,
-          borderRadius: BorderRadius.circular(16),
-          border: Border.all(color: cs.outlineVariant),
-        ),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: iconColor.withOpacity(0.12),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Icon(icon, color: iconColor, size: 26),
-            ),
-            const SizedBox(width: 14),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(children: [
-                    Text(title,
-                        style: const TextStyle(fontWeight: FontWeight.w700, fontSize: 15)),
-                    if (badge != null) ...[
-                      const SizedBox(width: 8),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: Colors.orange.withOpacity(0.15),
-                          borderRadius: BorderRadius.circular(4),
-                          border: Border.all(color: Colors.orange.withOpacity(0.4)),
-                        ),
-                        child: Text(badge!,
-                            style: const TextStyle(
-                                color: Colors.orange, fontSize: 9,
-                                fontWeight: FontWeight.w700, letterSpacing: 0.8)),
-                      ),
-                    ],
-                  ]),
-                  const SizedBox(height: 2),
-                  Text(subtitle, style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12)),
-                  const SizedBox(height: 8),
-                  ...bullets.map((b) => Padding(
-                    padding: const EdgeInsets.only(bottom: 2),
-                    child: Text(b, style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
-                  )),
-                ],
-              ),
-            ),
-            const Icon(Icons.chevron_right_rounded, color: Colors.white38),
-          ],
-        ),
-      ),
-    );
-  }
-}

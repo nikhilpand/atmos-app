@@ -1,6 +1,5 @@
 import 'dart:async';
-import 'dart:convert';
-import 'package:http/http.dart' as http;
+
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
@@ -25,6 +24,82 @@ class ExtractedStream {
   String toString() => 'ExtractedStream($providerName → $url)';
 }
 
+// ─── Ad-blocking CSS/JS injected before provider page loads ──────────────────
+//
+// This runs BEFORE the provider's own JS, blocking ad scripts from loading
+// and hiding overlay elements that trigger "verification" flows.
+
+const _adBlockJs = r'''
+(function() {
+  // Block known ad/tracking domains by intercepting script creation
+  var origCreate = document.createElement.bind(document);
+  document.createElement = function(tag) {
+    var el = origCreate(tag);
+    if (tag.toLowerCase() === 'script') {
+      var origSrcDesc = Object.getOwnPropertyDescriptor(HTMLScriptElement.prototype, 'src');
+      if (origSrcDesc && origSrcDesc.set) {
+        Object.defineProperty(el, 'src', {
+          set: function(v) {
+            var dominated = [
+              'popads', 'popunder', 'juicyads', 'exoclick', 'trafficjunky',
+              'adsterra', 'propellerads', 'clickadu', 'hilltopads',
+              'pushnotification', 'admaven', 'adskeeper', 'mgid',
+              'monetag', 'richpush', 'clickaine', 'evadav', 'push.js',
+              'sw.js', 'service-worker', 'notification', 'push-sdk',
+              'adsbygoogle', 'googlesyndication', 'doubleclick',
+              'pagead', 'adserver', 'bidvertiser', 'revcontent',
+              'disqus.com/embed', 'facebook.net/signals', 'analytics',
+            ];
+            var lower = (v || '').toLowerCase();
+            for (var i = 0; i < dominated.length; i++) {
+              if (lower.indexOf(dominated[i]) !== -1) {
+                return; // silently block
+              }
+            }
+            origSrcDesc.set.call(this, v);
+          },
+          get: function() {
+            return origSrcDesc.get ? origSrcDesc.get.call(this) : '';
+          },
+          configurable: true
+        });
+      }
+    }
+    return el;
+  };
+
+  // Block window.open (popup ads)
+  window.open = function() { return null; };
+
+  // Block alert/confirm/prompt (verification dialogs)
+  window.alert = function() {};
+  window.confirm = function() { return true; };
+  window.prompt = function() { return null; };
+
+  // Suppress notification permission requests
+  if (navigator.permissions) {
+    var origQuery = navigator.permissions.query.bind(navigator.permissions);
+    navigator.permissions.query = function(desc) {
+      if (desc && desc.name === 'notifications') {
+        return Promise.resolve({ state: 'denied' });
+      }
+      return origQuery(desc);
+    };
+  }
+
+  // Hide overlay ads via CSS injection
+  var style = document.createElement('style');
+  style.textContent = [
+    '[class*="popup"]', '[class*="overlay"]', '[class*="modal"]',
+    '[id*="popup"]', '[id*="overlay"]', '[id*="modal"]',
+    '[class*="adblock"]', '[class*="Adblock"]',
+    '[class*="verify"]', '[class*="captcha"]',
+    'iframe[src*="ads"]', 'iframe[src*="pop"]',
+  ].join(',') + '{ display:none !important; pointer-events:none !important; }';
+  (document.head || document.documentElement).appendChild(style);
+})();
+''';
+
 // ─── JavaScript that hooks into every possible way a video URL can be set ─────
 //
 // The previous approach (shouldInterceptRequest) failed because providers use
@@ -44,6 +119,9 @@ const _extractorJs = r'''
   function report(url, method) {
     if (!url || reported[url]) return;
     if (url.startsWith('blob:') || url.startsWith('data:')) return;
+    // Filter out non-stream URLs (tracking pixels, images, etc.)
+    if (url.match(/\.(gif|png|jpg|jpeg|svg|ico|css|woff|woff2|ttf|eot)(\?|$)/i)) return;
+    if (url.length > 2000) return; // suspiciously long URLs are usually tracking
     reported[url] = true;
     try {
       window.flutter_inappwebview.callHandler('onStreamFound', url, method);
@@ -57,7 +135,8 @@ const _extractorJs = r'''
         || u.includes('.mpd') || u.includes('/playlist.m3u8')
         || u.includes('master.m3u8') || u.includes('index.m3u8')
         || (u.includes('video') && u.includes('manifest'))
-        || u.includes('/hls/') || u.includes('/stream');
+        || u.includes('/hls/') || u.includes('/stream')
+        || u.includes('mpegurl');
   }
 
   // ── Hook 1: HTMLMediaElement.src setter ──
@@ -170,46 +249,48 @@ const _extractorJs = r'''
 // ─── Stream Extractor Service ─────────────────────────────────────────────────
 
 /// Loads an embed page in a [HeadlessInAppWebView] and injects JavaScript
-/// hooks that monitor every way a video URL can be set in the DOM:
-/// - HTMLMediaElement.src setter override
-/// - Element.setAttribute override
-/// - fetch() / XMLHttpRequest.open interception
-/// - Polling <video>/<source> elements every 500ms
-/// - MutationObserver for dynamically added elements
+/// hooks that monitor every way a video URL can be set in the DOM.
 ///
-/// When a video URL is detected, it's sent back to Flutter via a JS handler.
+/// Architecture (from the M3U8/HLS research):
+/// - Providers use obfuscated JS to resolve stream URLs
+/// - The JS runs in the WebView, resolving the m3u8 URL
+/// - Our hooks intercept the URL at the moment it's assigned
+/// - media_kit (mpv/ffmpeg) handles HLS playback natively
+///
+/// This approach is necessary because:
+/// - Providers don't put m3u8 URLs in their initial HTML
+/// - Server-side fetch + regex returns nothing useful
+/// - The m3u8 URL is only resolved after JS execution
 class StreamExtractorService {
-  static const _timeout = Duration(seconds: 25);
+  static const _timeout = Duration(seconds: 18);
 
   final List<String> _userAgents = [
     'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
-    'Mozilla/5.0 (Linux; Android 13; SM-S918B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/114.0.0.0 Mobile Safari/537.36',
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_4_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4.1 Safari/605.1.15',
   ];
 
+  /// Primary extraction entry point.
+  /// Tries headless WebView extraction with JS hooks and ad-blocking.
   Future<ExtractedStream?> extract({
     required String url,
     required String providerName,
   }) async {
-    // 1. Cloudflare Worker Reverse Proxy Bypass
-    // Add your worker URL here:
-    final workerStream = await resolveViaWorker(url, providerName);
-    if (workerStream != null) return workerStream;
-
-    // 2. Fast Path API Resolution
-    final apiStream = await resolveViaApi(url, providerName);
-    if (apiStream != null) return apiStream;
-
-    // 3. Headless WebView Extraction with Retry
+    // Headless WebView Extraction with ad-blocking + JS hooks
+    // Try with 2 different user agents if first fails
     for (int i = 0; i < 2; i++) {
-      final stream = await _extractWithUa(url, providerName, _userAgents[i % _userAgents.length]);
+      final stream = await _extractWithUa(
+        url,
+        providerName,
+        _userAgents[i % _userAgents.length],
+      );
       if (stream != null) return stream;
     }
     return null;
   }
 
-  Future<ExtractedStream?> _extractWithUa(String url, String providerName, String userAgent) async {
+  Future<ExtractedStream?> _extractWithUa(
+      String url, String providerName, String userAgent) async {
     final completer = Completer<ExtractedStream?>();
     HeadlessInAppWebView? headless;
 
@@ -237,6 +318,10 @@ class StreamExtractorService {
           // Allow cross-origin iframe access where possible
           javaScriptCanOpenWindowsAutomatically: false,
           useShouldInterceptRequest: true,
+          // Block popups and new windows (ad redirects)
+          supportMultipleWindows: false,
+          // Disable geolocation (used by some verification flows)
+          geolocationEnabled: false,
         ),
 
         onWebViewCreated: (controller) {
@@ -249,6 +334,13 @@ class StreamExtractorService {
               final method = args.length > 1 ? args[1] as String : 'unknown';
 
               if (streamUrl.isEmpty) return;
+
+              // Validate the URL looks like a real stream
+              if (!_isValidStreamUrl(streamUrl)) {
+                debugPrint(
+                    '[Extractor] ⚠ Rejected suspicious URL via $method: $streamUrl');
+                return;
+              }
 
               debugPrint(
                   '[Extractor] ✅ Found stream via $method on $providerName:\n  $streamUrl');
@@ -268,8 +360,9 @@ class StreamExtractorService {
           );
         },
 
-        // Inject hooks as early as possible — before the page JS runs
+        // Inject ad-blocker + hooks BEFORE the page JS runs
         onLoadStart: (controller, _) async {
+          await controller.evaluateJavascript(source: _adBlockJs);
           await controller.evaluateJavascript(source: _extractorJs);
         },
 
@@ -283,7 +376,19 @@ class StreamExtractorService {
           if (completer.isCompleted) return null;
           final reqUrl = request.url.toString();
           final u = reqUrl.toLowerCase();
-          if (u.contains('.m3u8') || (u.contains('.mp4') && !u.contains('thumb'))) {
+
+          // Block known ad domains at network level
+          if (_isAdDomain(u)) {
+            return WebResourceResponse(
+              statusCode: 403,
+              reasonPhrase: 'Blocked',
+            );
+          }
+
+          // Detect stream URLs in network traffic
+          if ((u.contains('.m3u8') ||
+                  (u.contains('.mp4') && !u.contains('thumb'))) &&
+              _isValidStreamUrl(reqUrl)) {
             debugPrint(
                 '[Extractor] ✅ Intercepted via network on $providerName:\n  $reqUrl');
             if (!completer.isCompleted) {
@@ -302,8 +407,18 @@ class StreamExtractorService {
           return null;
         },
 
+        // Prevent navigation to ad domains
+        shouldOverrideUrlLoading: (controller, action) async {
+          final navUrl = action.request.url?.toString().toLowerCase() ?? '';
+          if (_isAdDomain(navUrl)) {
+            return NavigationActionPolicy.CANCEL;
+          }
+          return NavigationActionPolicy.ALLOW;
+        },
+
         onLoadError: (_, __, code, msg) {
-          debugPrint('[Extractor] ❌ Load error on $providerName: $code $msg');
+          debugPrint(
+              '[Extractor] ❌ Load error on $providerName: $code $msg');
           // Don't complete on load error — some providers trigger errors but
           // still load video content in sub-frames
         },
@@ -325,76 +440,119 @@ class StreamExtractorService {
   /// Try sources sequentially (not batched — one headless webview at a time
   /// is more reliable on low-memory devices).
   Future<ExtractedStream?> extractBestFrom(
-    List<(String name, String url)> sources,
-  ) async {
-    for (final source in sources) {
-      debugPrint('[Extractor] ── Trying ${source.$1}...');
+    List<(String name, String url)> sources, {
+    ValueChanged<String>? onStatusUpdate,
+  }) async {
+    for (int i = 0; i < sources.length; i++) {
+      final source = sources[i];
+      final status = 'Trying ${source.$1}… (${i + 1}/${sources.length})';
+      debugPrint('[Extractor] ── $status');
+      onStatusUpdate?.call(status);
+
       final result = await extract(url: source.$2, providerName: source.$1);
       if (result != null) return result;
     }
     return null;
   }
 
-  /// Try bypassing Cloudflare using our Cloudflare Worker Reverse Proxy
-  Future<ExtractedStream?> resolveViaWorker(String url, String providerName) async {
-    // Note: Replace this with your actual deployed Worker URL!
-    final String workerUrl = dotenv.env['EXTRACTOR_WORKER_URL'] ?? 'https://atmos-extractor.nkp9450732628.workers.dev/';
-    
-    if (workerUrl.contains('REPLACE_WITH')) return null;
+  /// Validate that a URL actually looks like a video stream
+  /// and not a tracking pixel or ad redirect.
+  bool _isValidStreamUrl(String url) {
+    final u = url.toLowerCase();
 
-    try {
-      final base64Url = base64UrlEncode(utf8.encode(url));
-      final proxyUrl = '$workerUrl?url=$base64Url';
-      
-      debugPrint('[Extractor] ── Trying Cloudflare Worker Bypass for $providerName');
-      final response = await http.get(Uri.parse(proxyUrl), headers: {
-        'User-Agent': _userAgents.first,
-      }).timeout(const Duration(seconds: 10));
-      
-      if (response.statusCode == 200) {
-        final body = response.body;
-        // Basic Regex to find m3u8 or mp4
-        final regex = RegExp(r'''(https?://[^\s"'<>]+?\.(?:m3u8|mp4)[^\s"'<>]*)''');
-        final match = regex.firstMatch(body);
-        if (match != null) {
-          final streamUrl = match.group(1)!;
-          debugPrint('[Extractor] ✅ Found stream via Worker on $providerName:\n  $streamUrl');
-          return ExtractedStream(
-            url: streamUrl,
-            headers: {
-              'Referer': url,
-              'Origin': Uri.parse(url).origin,
-            },
-            providerName: providerName,
-          );
-        }
-      }
-    } catch (e) {
-      debugPrint('[Extractor] ❌ Worker Bypass Failed: $e');
+    // Must be HTTP(S)
+    if (!u.startsWith('http://') && !u.startsWith('https://')) return false;
+
+    // Must contain a stream indicator
+    final hasStreamIndicator = u.contains('.m3u8') ||
+        u.contains('.mp4') ||
+        u.contains('.mkv') ||
+        u.contains('.mpd') ||
+        u.contains('/hls/') ||
+        u.contains('mpegurl');
+
+    if (!hasStreamIndicator) return false;
+
+    // Reject known non-stream URLs
+    final rejectPatterns = [
+      'cdn.jsdelivr',
+      'jquery',
+      'analytics',
+      'tracking',
+      'pixel',
+      'beacon',
+      'thumb',
+      'poster',
+      'preview',
+      'banner',
+      '.gif',
+      '.png',
+      '.jpg',
+      'advertisement',
+    ];
+
+    for (final p in rejectPatterns) {
+      if (u.contains(p)) return false;
     }
-    return null;
+
+    // URL shouldn't be suspiciously short (tracking redirect) or long
+    if (url.length < 20 || url.length > 2000) return false;
+
+    return true;
   }
 
-  /// Fast path for providers with known public APIs or direct manifest endpoints
-  Future<ExtractedStream?> resolveViaApi(String url, String providerName) async {
-    // Implement known API fast paths.
-    // E.g., if vidsrc.dev exposes a JSON endpoint instead of HTML:
-    if (providerName.toLowerCase().contains('vidsrc')) {
-      // Mocking a successful API resolution for vidsrc providers as they
-      // frequently block headless WebViews via Cloudflare.
-      // In a real app, this would perform a dart:io HttpClient request to
-      // the provider's API endpoint to retrieve the m3u8.
-      /*
-      try {
-        final apiUrl = url.replaceFirst('/embed/', '/api/');
-        final response = await http.get(Uri.parse(apiUrl));
-        if (response.statusCode == 200) {
-           final json = jsonDecode(response.body);
-           return ExtractedStream(...);
-        }
-      } catch (_) {}
-      */
+  /// Check if a URL belongs to a known ad/tracking domain
+  bool _isAdDomain(String url) {
+    const adDomains = [
+      'popads.net',
+      'popcash.net',
+      'juicyads.com',
+      'exoclick.com',
+      'trafficjunky.net',
+      'adsterra.com',
+      'propellerads.com',
+      'clickadu.com',
+      'hilltopads.com',
+      'admaven.co',
+      'adskeeper.com',
+      'mgid.com',
+      'monetag.com',
+      'richpush.co',
+      'clickaine.com',
+      'evadav.com',
+      'bidvertiser.com',
+      'revcontent.com',
+      'googlesyndication.com',
+      'doubleclick.net',
+      'googleadservices.com',
+      'google-analytics.com',
+      'facebook.net',
+      'adnxs.com',
+      'adsrvr.org',
+      'outbrain.com',
+      'taboola.com',
+      'pushnotification',
+      'onesignal.com',
+      'pushwoosh.com',
+      'cleverpush.com',
+      'disqus.com',
+      'betrad.com',
+      'moatads.com',
+      'serving-sys.com',
+    ];
+
+    for (final domain in adDomains) {
+      if (url.contains(domain)) return true;
     }
-    return null;
+    return false;
+  }
+
+  /// Get the proxy URL for an HLS stream that needs Referer bypass.
+  /// Uses the Cloudflare Worker's /proxy endpoint.
+  static String? getProxyUrl(String streamUrl, String referer) {
+    final workerUrl = dotenv.env['EXTRACTOR_WORKER_URL'];
+    if (workerUrl == null || workerUrl.isEmpty) return null;
+
+    return '$workerUrl/proxy?url=${Uri.encodeComponent(streamUrl)}&referer=${Uri.encodeComponent(referer)}';
   }
 }
