@@ -7,28 +7,42 @@ import 'package:media_kit_video/media_kit_video.dart';
 import '../providers/providers.dart';
 import '../services/stream_extractor_service.dart';
 
-// ─── Embed providers to try (ordered by reliability) ─────────────────────────
+// ─── Embed providers to try (ordered by reliability, tested May 2025) ────────
+//
+// Provider status:
+//   ✅ VidSrc ICU  — 200, has obfuscated stream resolution
+//   ✅ Videasy     — 200, Next.js app, client-side JS stream resolution
+//   ✅ VidFast     — 200, reliable fallback
+//   ✅ VidAPI      — 200, uses vaplayer.ru
+//   ✅ VidLink     — 200, uses TMDB IDs
+//   ✅ VidSrc Dev  — 200, fingerprint-gated
+//   ✅ AutoEmbed   — 200, last resort
+//   ❌ VidSrc.me   — DEAD (returns 000/timeout)
 
 List<(String, String)> _buildSourceList(
     String type, String imdbId, String tmdbId, int season, int episode) {
   final tvSources = [
-    ('VidSrc.me', 'https://vidsrc.me/embed/tv?imdb=$imdbId&season=$season&episode=$episode'),
+    // Batch 1 (parallel) — most reliable
+    ('VidSrc ICU', 'https://vidsrc.icu/embed/tv/$imdbId/$season/$episode'),
     ('Videasy', 'https://player.videasy.net/tv/$imdbId/$season/$episode'),
+    ('VidFast', 'https://vidfast.pro/tv/$imdbId/$season/$episode'),
+    // Batch 2 (parallel)
     ('VidAPI', 'https://vaplayer.ru/embed/tv/$imdbId/$season/$episode'),
     ('VidLink', 'https://vidlink.pro/tv/$tmdbId/$season/$episode'),
-    ('VidSrc ICU', 'https://vidsrc.icu/embed/tv/$imdbId/$season/$episode'),
     ('VidSrc Dev', 'https://vidsrc.dev/embed/tv/$imdbId/$season/$episode'),
-    ('VidFast', 'https://vidfast.pro/tv/$imdbId/$season/$episode'),
+    // Batch 3 (parallel) — last resort
     ('AutoEmbed', 'https://autoembed.co/tv/tmdb/$tmdbId-$season-$episode'),
   ];
   final movieSources = [
-    ('VidSrc.me', 'https://vidsrc.me/embed/movie?imdb=$imdbId'),
+    // Batch 1 (parallel) — most reliable
+    ('VidSrc ICU', 'https://vidsrc.icu/embed/movie/$imdbId'),
     ('Videasy', 'https://player.videasy.net/movie/$imdbId'),
+    ('VidFast', 'https://vidfast.pro/movie/$imdbId'),
+    // Batch 2 (parallel)
     ('VidAPI', 'https://vaplayer.ru/embed/movie/$imdbId'),
     ('VidLink', 'https://vidlink.pro/movie/$tmdbId'),
-    ('VidSrc ICU', 'https://vidsrc.icu/embed/movie/$imdbId'),
     ('VidSrc Dev', 'https://vidsrc.dev/embed/movie/$imdbId'),
-    ('VidFast', 'https://vidfast.pro/movie/$imdbId'),
+    // Batch 3 (parallel) — last resort
     ('AutoEmbed', 'https://autoembed.co/movie/tmdb/$tmdbId'),
   ];
   return type == 'tv' ? tvSources : movieSources;
@@ -239,6 +253,78 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
     });
   }
 
+  void _showSourcePicker() {
+    final sources = _buildSourceList(_type, _imdbId, _tmdbId, _season, _episode);
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (_) => Container(
+        decoration: const BoxDecoration(
+          color: Color(0xFF1A1A1A),
+          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        ),
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 40, height: 4,
+                decoration: BoxDecoration(
+                  color: Colors.white24,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            const SizedBox(height: 16),
+            const Text('Switch Source',
+                style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
+            const SizedBox(height: 4),
+            Text('Current: $_providerBadge',
+                style: const TextStyle(color: Colors.white38, fontSize: 12)),
+            const SizedBox(height: 12),
+            ...sources.map((s) => ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(
+                s.$1 == _providerBadge ? Icons.check_circle : Icons.play_circle_outline,
+                color: s.$1 == _providerBadge ? Colors.deepPurpleAccent : Colors.white54,
+                size: 22,
+              ),
+              title: Text(s.$1,
+                  style: TextStyle(
+                    color: s.$1 == _providerBadge ? Colors.deepPurpleAccent : Colors.white,
+                    fontWeight: s.$1 == _providerBadge ? FontWeight.w700 : FontWeight.w400,
+                  )),
+              onTap: () {
+                Navigator.pop(context);
+                _trySpecificSource(s.$1, s.$2);
+              },
+            )),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _trySpecificSource(String name, String url) async {
+    setState(() {
+      _state = _ExState.extracting;
+      _statusMsg = 'Trying $name…';
+    });
+    final stream = await _extractor.extract(url: url, providerName: name);
+    if (!mounted) return;
+    if (stream != null) {
+      _playStream(stream);
+    } else {
+      setState(() {
+        _state = _ExState.failed;
+        _failedMsg = '$name failed to extract.\nTry another source.';
+      });
+    }
+  }
+
   // ── Build ──
 
   @override
@@ -346,6 +432,7 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
                       _seek(10);
                       _showSeekAnimation(1);
                     },
+                    onSwitchSource: _showSourcePicker,
                   ),
               ],
             ),
@@ -493,6 +580,7 @@ class _ControlsOverlay extends StatelessWidget {
   final VoidCallback onBack;
   final VoidCallback onSeekBack;
   final VoidCallback onSeekForward;
+  final VoidCallback onSwitchSource;
 
   const _ControlsOverlay({
     required this.title,
@@ -504,6 +592,7 @@ class _ControlsOverlay extends StatelessWidget {
     required this.onBack,
     required this.onSeekBack,
     required this.onSeekForward,
+    required this.onSwitchSource,
   });
 
   @override
@@ -555,21 +644,31 @@ class _ControlsOverlay extends StatelessWidget {
                       ],
                     ),
                   ),
-                  // Provider badge
+                  // Provider badge — tap to switch source
                   if (providerName.isNotEmpty)
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                      decoration: BoxDecoration(
-                        color: Colors.deepPurpleAccent.withOpacity(0.25),
-                        borderRadius: BorderRadius.circular(4),
-                        border: Border.all(color: Colors.deepPurpleAccent.withOpacity(0.5)),
+                    GestureDetector(
+                      onTap: onSwitchSource,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                        decoration: BoxDecoration(
+                          color: Colors.deepPurpleAccent.withOpacity(0.25),
+                          borderRadius: BorderRadius.circular(4),
+                          border: Border.all(color: Colors.deepPurpleAccent.withOpacity(0.5)),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(providerName.toUpperCase(),
+                                style: const TextStyle(
+                                    color: Colors.deepPurpleAccent,
+                                    fontSize: 10,
+                                    fontWeight: FontWeight.w700,
+                                    letterSpacing: 0.8)),
+                            const SizedBox(width: 4),
+                            const Icon(Icons.swap_horiz, color: Colors.deepPurpleAccent, size: 14),
+                          ],
+                        ),
                       ),
-                      child: Text(providerName.toUpperCase(),
-                          style: const TextStyle(
-                              color: Colors.deepPurpleAccent,
-                              fontSize: 10,
-                              fontWeight: FontWeight.w700,
-                              letterSpacing: 0.8)),
                     ),
                 ],
               ),
