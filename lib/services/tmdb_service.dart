@@ -1,4 +1,5 @@
-import 'package:dio/dio.dart';
+import 'dart:convert';
+import 'package:http/http.dart' as http;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:hive/hive.dart';
 import '../models/media_model.dart';
@@ -44,7 +45,6 @@ class _TmdbCache {
 
 class TmdbService {
   late final String _base;
-  late final Dio _dio;
   late final String _apiKey;
   final _cache = _TmdbCache();
 
@@ -52,15 +52,31 @@ class TmdbService {
     _apiKey = dotenv.env['TMDB_API_KEY'] ?? '';
     final workerUrl = dotenv.env['EXTRACTOR_WORKER_URL'] ?? '';
     _base = workerUrl.isNotEmpty ? '$workerUrl/tmdb' : 'https://api.themoviedb.org/3';
-    _dio = Dio(BaseOptions(
-      baseUrl: _base,
-      queryParameters: {'api_key': _apiKey, 'language': 'en-US'},
-      connectTimeout: const Duration(seconds: 15),
-      receiveTimeout: const Duration(seconds: 20),
-    ));
   }
 
   Future<void> initCache() => _cache.init();
+
+  /// Build a full URI with default query params merged in.
+  Uri _uri(String path, [Map<String, dynamic>? extra]) {
+    final params = <String, String>{
+      'api_key': _apiKey,
+      'language': 'en-US',
+    };
+    if (extra != null) {
+      for (final e in extra.entries) {
+        params[e.key] = '${e.value}';
+      }
+    }
+    return Uri.parse('$_base$path').replace(queryParameters: params);
+  }
+
+  /// Perform GET and decode JSON.
+  Future<Map<String, dynamic>> _get(String path, [Map<String, dynamic>? queryParams]) async {
+    final uri = _uri(path, queryParams);
+    final res = await http.get(uri).timeout(const Duration(seconds: 20));
+    if (res.statusCode != 200) throw Exception('TMDB ${res.statusCode}');
+    return jsonDecode(res.body) as Map<String, dynamic>;
+  }
 
   // ── Genre Constants ──────────────────────────────────────────────────────────
 
@@ -106,7 +122,8 @@ class TmdbService {
 
   Future<List<TmdbMedia>> _getCached(
     String cacheKey,
-    Future<Response> Function() fetcher, {
+    String path, {
+    Map<String, dynamic>? queryParams,
     MediaType? defaultType,
   }) async {
     // Try cache first
@@ -116,8 +133,8 @@ class TmdbService {
     }
     // Fetch fresh
     try {
-      final res = await fetcher();
-      final results = res.data['results'] as List? ?? [];
+      final data = await _get(path, queryParams);
+      final results = data['results'] as List? ?? [];
       await _cache.set(cacheKey, results);
       return _parseResults(results, defaultType: defaultType);
     } catch (_) {
@@ -128,42 +145,34 @@ class TmdbService {
   // ── Home / Discovery ─────────────────────────────────────────────────────────
 
   Future<List<TmdbMedia>> getTrending({String window = 'week'}) =>
-      _getCached('trending_$window',
-          () => _dio.get('/trending/all/$window'));
+      _getCached('trending_$window', '/trending/all/$window');
 
   Future<List<TmdbMedia>> getPopularMovies({int page = 1}) =>
-      _getCached('popular_movies_$page',
-          () => _dio.get('/movie/popular', queryParameters: {'page': page}),
-          defaultType: MediaType.movie);
+      _getCached('popular_movies_$page', '/movie/popular',
+          queryParams: {'page': page}, defaultType: MediaType.movie);
 
   Future<List<TmdbMedia>> getPopularTv({int page = 1}) =>
-      _getCached('popular_tv_$page',
-          () => _dio.get('/tv/popular', queryParameters: {'page': page}),
-          defaultType: MediaType.tv);
+      _getCached('popular_tv_$page', '/tv/popular',
+          queryParams: {'page': page}, defaultType: MediaType.tv);
 
   Future<List<TmdbMedia>> getTopRatedMovies({int page = 1}) =>
-      _getCached('top_rated_movies_$page',
-          () => _dio.get('/movie/top_rated', queryParameters: {'page': page}),
-          defaultType: MediaType.movie);
+      _getCached('top_rated_movies_$page', '/movie/top_rated',
+          queryParams: {'page': page}, defaultType: MediaType.movie);
 
   Future<List<TmdbMedia>> getTopRatedTv({int page = 1}) =>
-      _getCached('top_rated_tv_$page',
-          () => _dio.get('/tv/top_rated', queryParameters: {'page': page}),
-          defaultType: MediaType.tv);
+      _getCached('top_rated_tv_$page', '/tv/top_rated',
+          queryParams: {'page': page}, defaultType: MediaType.tv);
 
   Future<List<TmdbMedia>> getNowPlayingMovies() =>
-      _getCached('now_playing',
-          () => _dio.get('/movie/now_playing'),
+      _getCached('now_playing', '/movie/now_playing',
           defaultType: MediaType.movie);
 
   Future<List<TmdbMedia>> getAiringToday() =>
-      _getCached('airing_today',
-          () => _dio.get('/tv/airing_today'),
+      _getCached('airing_today', '/tv/airing_today',
           defaultType: MediaType.tv);
 
   Future<List<TmdbMedia>> getUpcoming() =>
-      _getCached('upcoming',
-          () => _dio.get('/movie/upcoming'),
+      _getCached('upcoming', '/movie/upcoming',
           defaultType: MediaType.movie);
 
   // ── Genre Discovery ──────────────────────────────────────────────────────────
@@ -174,19 +183,18 @@ class TmdbService {
     int page = 1,
     String sortBy = 'popularity.desc',
     double minRating = 0,
-  }) async {
+  }) {
     final cacheKey = 'genre_${genreId}_${type.name}_$page';
+    final endpoint = type == MediaType.movie ? '/discover/movie' : '/discover/tv';
     return _getCached(
       cacheKey,
-      () {
-        final endpoint = type == MediaType.movie ? '/discover/movie' : '/discover/tv';
-        return _dio.get(endpoint, queryParameters: {
-          'with_genres': genreId,
-          'page': page,
-          'sort_by': sortBy,
-          if (minRating > 0) 'vote_average.gte': minRating,
-          'vote_count.gte': 50,
-        });
+      endpoint,
+      queryParams: {
+        'with_genres': genreId,
+        'page': page,
+        'sort_by': sortBy,
+        if (minRating > 0) 'vote_average.gte': minRating,
+        'vote_count.gte': 50,
       },
       defaultType: type,
     );
@@ -199,8 +207,8 @@ class TmdbService {
       final path = type == MediaType.movie
           ? '/movie/$tmdbId/recommendations'
           : '/tv/$tmdbId/recommendations';
-      final res = await _dio.get(path);
-      return _parseResults(res.data['results'] ?? [], defaultType: type);
+      final data = await _get(path);
+      return _parseResults(data['results'] ?? [], defaultType: type);
     } catch (_) { return []; }
   }
 
@@ -209,8 +217,8 @@ class TmdbService {
       final path = type == MediaType.movie
           ? '/movie/$tmdbId/similar'
           : '/tv/$tmdbId/similar';
-      final res = await _dio.get(path);
-      return _parseResults(res.data['results'] ?? [], defaultType: type);
+      final data = await _get(path);
+      return _parseResults(data['results'] ?? [], defaultType: type);
     } catch (_) { return []; }
   }
 
@@ -219,29 +227,29 @@ class TmdbService {
   Future<List<TmdbMedia>> search(String query, {int page = 1}) async {
     if (query.trim().isEmpty) return [];
     try {
-      final res = await _dio.get('/search/multi', queryParameters: {
+      final data = await _get('/search/multi', {
         'query': query.trim(),
         'page': page,
         'include_adult': false,
       });
-      return _parseResults(res.data['results'] ?? []);
+      return _parseResults(data['results'] ?? []);
     } catch (_) { return []; }
   }
 
   // ── Details ──────────────────────────────────────────────────────────────────
 
   Future<TmdbDetails> getMovieDetails(int tmdbId) async {
-    final res = await _dio.get('/movie/$tmdbId', queryParameters: {
+    final data = await _get('/movie/$tmdbId', {
       'append_to_response': 'credits,external_ids,videos',
     });
-    return TmdbDetails.fromJson(res.data, MediaType.movie);
+    return TmdbDetails.fromJson(data, MediaType.movie);
   }
 
   Future<TmdbDetails> getTvDetails(int tmdbId) async {
-    final res = await _dio.get('/tv/$tmdbId', queryParameters: {
+    final data = await _get('/tv/$tmdbId', {
       'append_to_response': 'credits,external_ids',
     });
-    return TmdbDetails.fromJson(res.data, MediaType.tv);
+    return TmdbDetails.fromJson(data, MediaType.tv);
   }
 
   Future<String?> getImdbId(int tmdbId, MediaType type) async {
@@ -249,16 +257,16 @@ class TmdbService {
       final path = type == MediaType.movie
           ? '/movie/$tmdbId/external_ids'
           : '/tv/$tmdbId/external_ids';
-      final res = await _dio.get(path);
-      return res.data['imdb_id'];
+      final data = await _get(path);
+      return data['imdb_id'] as String?;
     } catch (_) { return null; }
   }
 
   // ── Episodes ─────────────────────────────────────────────────────────────────
 
   Future<List<Episode>> getEpisodes(int tmdbId, int season) async {
-    final res = await _dio.get('/tv/$tmdbId/season/$season');
-    return (res.data['episodes'] as List? ?? [])
+    final data = await _get('/tv/$tmdbId/season/$season');
+    return (data['episodes'] as List? ?? [])
         .map((e) => Episode.fromJson(e))
         .toList();
   }

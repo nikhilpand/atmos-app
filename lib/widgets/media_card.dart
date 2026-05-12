@@ -46,8 +46,11 @@ class _MediaCardState extends State<MediaCard> {
           curve: Curves.easeOut,
           width: w,
           height: h,
-          transform: Matrix4.identity()
-            ..scale(_isFocused ? 1.08 : 1.0),
+          transform: Matrix4.diagonal3Values(
+            _isFocused ? 1.08 : 1.0,
+            _isFocused ? 1.08 : 1.0,
+            1.0,
+          ),
           transformAlignment: Alignment.center,
           decoration: BoxDecoration(
             borderRadius: BorderRadius.circular(12),

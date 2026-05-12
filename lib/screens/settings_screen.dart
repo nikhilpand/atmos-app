@@ -7,7 +7,6 @@ import 'package:package_info_plus/package_info_plus.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import '../theme/app_theme.dart';
-import '../theme/app_tokens.dart';
 import '../providers/providers.dart';
 import '../models/download_source.dart';
 import '../services/telegram_service.dart';
@@ -48,7 +47,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       final info = await PackageInfo.fromPlatform();
       version = 'v${info.version} (${info.buildNumber})';
     } catch (_) {
-      version = 'v2.0.0';
+      version = 'v3.0.0';
     }
     if (!mounted) return;
     setState(() {
@@ -99,11 +98,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm),
         children: [
           // ── Appearance ─────────────────────────────────────────────
-          _SectionHeader('Appearance'),
+          const _SectionHeader('Appearance'),
           _AppearanceSection(ref: ref),
 
           // ── Download Settings ───────────────────────────────────────
-          _SectionHeader('Downloads'),
+          const _SectionHeader('Downloads'),
           _SettingTile(
             icon: Icons.high_quality_rounded,
             title: 'Default Quality',
@@ -155,7 +154,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
 
           // ── Telegram Account ───────────────────────────────────────
-          _SectionHeader('Telegram'),
+          const _SectionHeader('Telegram'),
           if (telegram.isLoggedIn)
             _SettingTile(
               icon: Icons.check_circle_rounded,
@@ -175,7 +174,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               onTap: () => _showTelegramLogin(context, telegram),
               trailing: Icon(Icons.chevron_right_rounded, color: cs.outline),
             ),
-          _SettingTile(
+          const _SettingTile(
             icon: Icons.info_outline_rounded,
             title: 'About Telegram Downloads',
             subtitle: 'Searches public channels for videos up to 1080p / 5 GB. Direct CDN — always fast.',
@@ -191,7 +190,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
 
           // ── Player Settings ─────────────────────────────────────────
-          _SectionHeader('Player'),
+          const _SectionHeader('Player'),
           _SettingTile(
             icon: Icons.source_rounded,
             title: 'Remember Last Source',
@@ -212,7 +211,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
 
           // ── App Settings ────────────────────────────────────────────
-          _SectionHeader('App'),
+          const _SectionHeader('App'),
           _SettingTile(
             icon: Icons.history_rounded,
             title: 'Save Watch History',
@@ -236,7 +235,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
           ),
 
           // ── About ───────────────────────────────────────────────────
-          _SectionHeader('About'),
+          const _SectionHeader('About'),
           _SettingTile(
             icon: Icons.system_update_rounded,
             title: 'Check for Updates',
@@ -258,10 +257,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               }
             },
           ),
-          _SettingTile(
+          const _SettingTile(
             icon: Icons.bolt_rounded,
             title: 'Powered by',
-            subtitle: 'TDLib · media_kit · flutter_inappwebview',
+            subtitle: 'TDLib · media_kit · Atmos Engine',
           ),
 
           const SizedBox(height: AppSpacing.xl),
@@ -363,7 +362,7 @@ class _AppearanceSection extends StatelessWidget {
                 spacing: AppSpacing.sm,
                 runSpacing: AppSpacing.sm,
                 children: kThemeSeeds.map((entry) {
-                  final isSelected = entry.seed.value == seed.value;
+                  final isSelected = entry.seed.toARGB32() == seed.toARGB32();
                   return Tooltip(
                     message: entry.label,
                     child: GestureDetector(
@@ -467,8 +466,8 @@ class _TelegramLoginSheetState extends State<_TelegramLoginSheet> {
           Row(children: [
             Container(
               width: 44, height: 44,
-              decoration: BoxDecoration(
-                gradient: const LinearGradient(
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
                   colors: [Color(0xFF2AABEE), Color(0xFF229ED9)],
                 ),
                 borderRadius: AppRadius.mdAll,

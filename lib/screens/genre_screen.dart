@@ -4,7 +4,6 @@ import 'package:flutter_animate/flutter_animate.dart';
 import 'package:go_router/go_router.dart';
 import '../models/media_model.dart';
 import '../providers/providers.dart';
-import '../services/tmdb_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/media_card.dart';
 

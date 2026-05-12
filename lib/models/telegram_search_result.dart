@@ -89,5 +89,5 @@ class TelegramSearchResult {
 
   @override
   String toString() =>
-      'TelegramSearchResult($quality, ${sizeFormatted}, $channelTitle, file:$fileId)';
+      'TelegramSearchResult($quality, $sizeFormatted, $channelTitle, file:$fileId)';
 }

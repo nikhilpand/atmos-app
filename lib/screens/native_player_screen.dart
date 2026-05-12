@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -66,6 +67,9 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
   double _scrubStartX = 0.0;
   Duration _scrubStartPos = Duration.zero;
 
+  // Position listener — MUST be stored to prevent leak on quality switch
+  StreamSubscription<Duration>? _positionSub;
+
   String get _title => widget.args['title'] as String? ?? 'Untitled';
   String get _type => widget.args['type'] as String? ?? 'movie';
   int get _season => widget.args['season'] as int? ?? 1;
@@ -103,6 +107,8 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
   void dispose() {
     _controlsTimer?.cancel();
     _seekAnimTimer?.cancel();
+    _gestureHideTimer?.cancel();
+    _positionSub?.cancel();
     _player.dispose();
     SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
@@ -181,7 +187,9 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
     }
 
     // Track progress for history + auto-advance
-    _player.stream.position.listen(_onPositionChanged);
+    // Cancel previous subscription to prevent listener leak on quality switch
+    await _positionSub?.cancel();
+    _positionSub = _player.stream.position.listen(_onPositionChanged);
   }
 
   // ── Subtitle control ──
@@ -461,6 +469,16 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
                       ? Video(
                           controller: _controller,
                           fit: _isFitMode ? BoxFit.contain : BoxFit.cover,
+                          subtitleViewConfiguration: const SubtitleViewConfiguration(
+                            style: TextStyle(
+                              fontSize: 28,
+                              color: Colors.white,
+                              backgroundColor: Color(0x99000000),
+                              height: 1.4,
+                            ),
+                            textAlign: TextAlign.center,
+                            padding: EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                          ),
                         )
                       : const SizedBox.shrink(),
                 ),
@@ -546,38 +564,55 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
                     left: _isBrightnessGesture ? 24 : null,
                     right: _isBrightnessGesture ? null : 24,
                     child: Center(
-                      child: Container(
-                        width: 40, height: 160,
-                        padding: const EdgeInsets.symmetric(vertical: 12),
-                        decoration: BoxDecoration(
-                          color: Colors.black87,
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              _isBrightnessGesture ? Icons.brightness_6_rounded : Icons.volume_up_rounded,
-                              color: Colors.white, size: 18,
+                      child: ClipRRect(
+                        borderRadius: BorderRadius.circular(16),
+                        child: BackdropFilter(
+                          filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+                          child: Container(
+                            width: 52, height: 180,
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                            decoration: BoxDecoration(
+                              color: Colors.black.withValues(alpha: 0.5),
+                              borderRadius: BorderRadius.circular(16),
+                              border: Border.all(color: Colors.white12),
                             ),
-                            const SizedBox(height: 8),
-                            Expanded(
-                              child: RotatedBox(
-                                quarterTurns: -1,
-                                child: LinearProgressIndicator(
-                                  value: _gestureValue,
-                                  backgroundColor: Colors.white24,
-                                  valueColor: const AlwaysStoppedAnimation<Color>(Colors.white),
-                                  borderRadius: BorderRadius.circular(4),
+                            child: Column(
+                              mainAxisSize: MainAxisSize.min,
+                              children: [
+                                Icon(
+                                  _isBrightnessGesture
+                                      ? (_gestureValue > 0.5 ? Icons.brightness_high_rounded : Icons.brightness_low_rounded)
+                                      : (_gestureValue > 0.5 ? Icons.volume_up_rounded : Icons.volume_down_rounded),
+                                  color: Colors.white, size: 20,
                                 ),
-                              ),
+                                const SizedBox(height: 12),
+                                Expanded(
+                                  child: RotatedBox(
+                                    quarterTurns: -1,
+                                    child: ClipRRect(
+                                      borderRadius: BorderRadius.circular(4),
+                                      child: LinearProgressIndicator(
+                                        value: _gestureValue,
+                                        backgroundColor: Colors.white12,
+                                        valueColor: AlwaysStoppedAnimation<Color>(
+                                          _isBrightnessGesture ? Colors.amber : Colors.white,
+                                        ),
+                                        minHeight: 4,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                const SizedBox(height: 12),
+                                Text(
+                                  '${(_gestureValue * 100).toInt()}%',
+                                  style: const TextStyle(
+                                    color: Colors.white, fontSize: 12,
+                                    fontWeight: FontWeight.w700,
+                                  ),
+                                ),
+                              ],
                             ),
-                            const SizedBox(height: 8),
-                            Text(
-                              '${(_gestureValue * 100).toInt()}%',
-                              style: const TextStyle(color: Colors.white, fontSize: 10, fontWeight: FontWeight.w600),
-                            ),
-                          ],
+                          ),
                         ),
                       ),
                     ),
@@ -620,31 +655,38 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
                     ),
                   ),
 
-                // ── Controls overlay ──
-                if (_state == _ExState.playing && _controlsVisible && !_isLocked)
-                  _ControlsOverlay(
-                    title: _title,
-                    type: _type,
-                    season: _season,
-                    episode: _episode,
-                    providerName: _providerBadge,
-                    player: _player,
-                    playbackSpeed: _playbackSpeed,
-                    isFitMode: _isFitMode,
-                    isLocked: _isLocked,
-                    hasSubtitles: _currentStream?.hasSubtitles ?? false,
-                    hasQualities: _currentStream?.hasQualities ?? false,
-                    activeSubIndex: _activeSubIndex,
-                    activeQuality: _activeQuality,
-                    onBack: () => Navigator.pop(context),
-                    onSeekBack: () { _seek(-10); _showSeekAnimation(-1); },
-                    onSeekForward: () { _seek(10); _showSeekAnimation(1); },
-                    onLock: _toggleLock,
-                    onCycleSpeed: _cycleSpeed,
-                    onToggleFit: _toggleFit,
-                    onNextEpisode: _type == 'tv' ? _advanceEpisode : null,
-                    onSubtitlePicker: _showSubtitlePicker,
-                    onQualityPicker: _showQualityPicker,
+                // ── Controls overlay (animated fade) ──
+                if (_state == _ExState.playing && !_isLocked)
+                  AnimatedOpacity(
+                    opacity: _controlsVisible ? 1.0 : 0.0,
+                    duration: const Duration(milliseconds: 300),
+                    child: IgnorePointer(
+                      ignoring: !_controlsVisible,
+                      child: _ControlsOverlay(
+                        title: _title,
+                        type: _type,
+                        season: _season,
+                        episode: _episode,
+                        providerName: _providerBadge,
+                        player: _player,
+                        playbackSpeed: _playbackSpeed,
+                        isFitMode: _isFitMode,
+                        isLocked: _isLocked,
+                        hasSubtitles: _currentStream?.hasSubtitles ?? false,
+                        hasQualities: _currentStream?.hasQualities ?? false,
+                        activeSubIndex: _activeSubIndex,
+                        activeQuality: _activeQuality,
+                        onBack: () => Navigator.pop(context),
+                        onSeekBack: () { _seek(-10); _showSeekAnimation(-1); },
+                        onSeekForward: () { _seek(10); _showSeekAnimation(1); },
+                        onLock: _toggleLock,
+                        onCycleSpeed: _cycleSpeed,
+                        onToggleFit: _toggleFit,
+                        onNextEpisode: _type == 'tv' ? _advanceEpisode : null,
+                        onSubtitlePicker: _showSubtitlePicker,
+                        onQualityPicker: _showQualityPicker,
+                      ),
+                    ),
                   ),
               ],
             ),
@@ -871,8 +913,12 @@ class _ControlsOverlay extends StatelessWidget {
                         ],
                       ),
                     ),
-                    // Lock button
-                    _OverlayIconBtn(icon: Icons.lock_open_rounded, onTap: onLock, tooltip: 'Lock'),
+                    // Lock button  
+                    _OverlayIconBtn(
+                      icon: isLocked ? Icons.lock_rounded : Icons.lock_open_rounded,
+                      onTap: onLock,
+                      tooltip: isLocked ? 'Unlock' : 'Lock',
+                    ),
                     // Fit/Fill toggle
                     _OverlayIconBtn(
                       icon: isFitMode ? Icons.fit_screen_rounded : Icons.crop_free_rounded,
@@ -958,24 +1004,51 @@ class _ControlsOverlay extends StatelessWidget {
 
                         return Column(
                           children: [
-                            // Seek bar
-                            SliderTheme(
-                              data: SliderTheme.of(context).copyWith(
-                                trackHeight: 3,
-                                thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
-                                overlayShape: const RoundSliderOverlayShape(overlayRadius: 16),
-                                activeTrackColor: Colors.white,
-                                inactiveTrackColor: Colors.white24,
-                                thumbColor: Colors.white,
-                                overlayColor: Colors.white24,
-                              ),
-                              child: Slider(
-                                value: progress,
-                                onChanged: (v) {
-                                  final newPos = Duration(milliseconds: (v * dur.inMilliseconds).toInt());
-                                  player.seek(newPos);
-                                },
-                              ),
+                            // Seekbar with buffered progress underneath
+                            Stack(
+                              children: [
+                                // Buffered bar
+                                StreamBuilder<Duration>(
+                                  stream: player.stream.buffer,
+                                  builder: (_, bufSnap) {
+                                    final buf = bufSnap.data ?? Duration.zero;
+                                    final bufProgress = dur.inMilliseconds > 0
+                                        ? (buf.inMilliseconds / dur.inMilliseconds).clamp(0.0, 1.0)
+                                        : 0.0;
+                                    return Padding(
+                                      padding: const EdgeInsets.symmetric(horizontal: 24),
+                                      child: ClipRRect(
+                                        borderRadius: BorderRadius.circular(2),
+                                        child: LinearProgressIndicator(
+                                          value: bufProgress,
+                                          backgroundColor: Colors.white12,
+                                          valueColor: const AlwaysStoppedAnimation<Color>(Colors.white24),
+                                          minHeight: 3,
+                                        ),
+                                      ),
+                                    );
+                                  },
+                                ),
+                                // Seek slider
+                                SliderTheme(
+                                  data: SliderTheme.of(context).copyWith(
+                                    trackHeight: 3,
+                                    thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
+                                    overlayShape: const RoundSliderOverlayShape(overlayRadius: 16),
+                                    activeTrackColor: Colors.white,
+                                    inactiveTrackColor: Colors.transparent,
+                                    thumbColor: Colors.white,
+                                    overlayColor: Colors.white24,
+                                  ),
+                                  child: Slider(
+                                    value: progress,
+                                    onChanged: (v) {
+                                      final newPos = Duration(milliseconds: (v * dur.inMilliseconds).toInt());
+                                      player.seek(newPos);
+                                    },
+                                  ),
+                                ),
+                              ],
                             ),
                             // Time + controls row
                             Row(

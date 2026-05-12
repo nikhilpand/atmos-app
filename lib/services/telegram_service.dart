@@ -75,7 +75,6 @@ class TelegramService extends ChangeNotifier {
   // Isolate communication
   Isolate? _receiveIsolate;
   ReceivePort? _mainReceivePort;
-  SendPort? _isolateSendPort;
 
   // Download tracking
   final _downloadProgress = <int, TelegramDownloadProgress>{};
@@ -146,7 +145,7 @@ class TelegramService extends ChangeNotifier {
     _receiveIsolate?.kill(priority: Isolate.immediate);
     _mainReceivePort?.close();
     if (_clientId != null) {
-      _send(td.Close());
+      _send(const td.Close());
     }
     super.dispose();
   }
@@ -184,7 +183,7 @@ class TelegramService extends ChangeNotifier {
   Future<void> logout() async {
     _authState = TelegramAuthState.loggingOut;
     notifyListeners();
-    _send(td.LogOut());
+    _send(const td.LogOut());
   }
 
   // ── Global Search (Hybrid: AtmosIndex catalog + TDLib) ────────────────────
@@ -378,8 +377,8 @@ class TelegramService extends ChangeNotifier {
       });
     }
 
-    final r1 = await fire(td.SearchMessagesFilterDocument());
-    final r2 = await fire(td.SearchMessagesFilterVideo());
+    final r1 = await fire(const td.SearchMessagesFilterDocument());
+    final r2 = await fire(const td.SearchMessagesFilterVideo());
     final seen = <int>{};
     return [...r1, ...r2].where((r) => seen.add(r.fileId)).toList();
   }
@@ -640,7 +639,9 @@ class TelegramService extends ChangeNotifier {
         final mime = doc.mimeType.toLowerCase();
         if (!mime.contains('video') &&
             !mime.contains('matroska') &&
-            !mime.contains('mp4')) continue;
+            !mime.contains('mp4')) {
+          continue;
+        }
       } else {
         continue;
       }
@@ -649,13 +650,17 @@ class TelegramService extends ChangeNotifier {
       final fileSize = video?.video.expectedSize ?? doc?.document.expectedSize ?? 0;
       final fileName = video?.fileName           ?? doc?.fileName             ?? '';
       final caption  = switch (content) {
-        td.MessageVideo()    => (content as td.MessageVideo).caption.text,
-        td.MessageDocument() => (content as td.MessageDocument).caption.text,
-        _                    => '',
+        td.MessageVideo(:final caption)    => caption.text,
+        td.MessageDocument(:final caption) => caption.text,
+        _                                  => '',
       };
 
-      if (fileSize < minBytes) continue;
-      if (fileSize > maxBytes) continue;
+      if (fileSize < minBytes) {
+        continue;
+      }
+      if (fileSize > maxBytes) {
+        continue;
+      }
 
       // Strict season/episode filtering
       if (targetSeason != null && targetEpisode != null) {
@@ -667,7 +672,9 @@ class TelegramService extends ChangeNotifier {
       final quality = _parseQuality(fileName, caption);
       final qLower  = quality.toLowerCase();
       if (qLower.contains('4k') || qLower.contains('2160') ||
-          qLower.contains('uhd') || qLower.contains('dv')) continue;
+          qLower.contains('uhd') || qLower.contains('dv')) {
+        continue;
+      }
 
       final codec    = _parseVideoCodec(fileName, caption);
       final audio    = _parseAudio(fileName, caption);
@@ -743,7 +750,6 @@ class TelegramService extends ChangeNotifier {
     if (combined.contains('720P') || combined.contains('720')) return '720p';
     if (combined.contains('480P') || combined.contains('480')) return '480p';
     // Guess from file size
-    final maxSize = fileName.length > caption.length ? fileName : caption;
     return 'HD'; // default if we can't parse
   }
 
@@ -773,24 +779,40 @@ class TelegramService extends ChangeNotifier {
 
     // ── Indian languages (check before generic ENG so ORG/ORIGIN doesn't match)
     if (t.contains('HINDI') || t.contains(' HIN ') || t.contains('.HIN.') ||
-        t.contains('-HIN-') || t.contains('[HIN]')) return 'Hindi';
+        t.contains('-HIN-') || t.contains('[HIN]')) {
+      return 'Hindi';
+    }
     if (t.contains('TAMIL') || t.contains(' TAM ') || t.contains('.TAM.') ||
-        t.contains('-TAM-') || t.contains('[TAM]')) return 'Tamil';
+        t.contains('-TAM-') || t.contains('[TAM]')) {
+      return 'Tamil';
+    }
     if (t.contains('TELUGU') || t.contains(' TEL ') || t.contains('.TEL.') ||
-        t.contains('-TEL-') || t.contains('[TEL]')) return 'Telugu';
+        t.contains('-TEL-') || t.contains('[TEL]')) {
+      return 'Telugu';
+    }
     if (t.contains('MALAYALAM') || t.contains(' MAL ') || t.contains('.MAL.') ||
-        t.contains('-MAL-') || t.contains('[MAL]')) return 'Malayalam';
+        t.contains('-MAL-') || t.contains('[MAL]')) {
+      return 'Malayalam';
+    }
     if (t.contains('KANNADA') || t.contains(' KAN ') || t.contains('.KAN.') ||
-        t.contains('-KAN-') || t.contains('[KAN]')) return 'Kannada';
+        t.contains('-KAN-') || t.contains('[KAN]')) {
+      return 'Kannada';
+    }
     if (t.contains('BENGALI') || t.contains(' BEN ') || t.contains('.BEN.') ||
-        t.contains('-BEN-') || t.contains('[BEN]')) return 'Bengali';
+        t.contains('-BEN-') || t.contains('[BEN]')) {
+      return 'Bengali';
+    }
     if (t.contains('PUNJABI') || t.contains(' PUN ') || t.contains('.PUN.') ||
-        t.contains('-PUN-') || t.contains('[PUN]')) return 'Punjabi';
+        t.contains('-PUN-') || t.contains('[PUN]')) {
+      return 'Punjabi';
+    }
 
     // ── English (explicit tag only — don't default to English)
     if (t.contains(' ENGLISH ') || t.contains('.ENGLISH.') ||
         t.contains(' ENG ') || t.contains('.ENG.') ||
-        t.contains('-ENG-') || t.contains('[ENG]')) return 'English';
+        t.contains('-ENG-') || t.contains('[ENG]')) {
+      return 'English';
+    }
 
     // ── No language tag detected — return null (= Original / unknown)
     return null;

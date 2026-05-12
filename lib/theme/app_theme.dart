@@ -135,7 +135,7 @@ class AtmosTheme {
         filled: true,
         fillColor: scheme.surfaceContainerHighest,
         hintStyle: GoogleFonts.outfit(color: scheme.outline),
-        border: OutlineInputBorder(
+        border: const OutlineInputBorder(
           borderRadius: AppRadius.mdAll,
           borderSide: BorderSide.none,
         ),

@@ -1,5 +1,6 @@
+import 'dart:convert';
 import 'dart:io';
-import 'package:dio/dio.dart';
+import 'package:http/http.dart' as http;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -41,7 +42,6 @@ class GithubAsset {
 }
 
 class OtaUpdateService {
-  final Dio _dio = Dio();
   final String _repo = 'nikhilpand/atmos-app';
   static const _channel = MethodChannel('com.example.atmos/install');
 
@@ -49,12 +49,15 @@ class OtaUpdateService {
   /// Returns [GithubRelease] if an update is available, null otherwise.
   Future<GithubRelease?> checkForUpdate() async {
     try {
-      final response = await _dio.get(
-        'https://api.github.com/repos/$_repo/releases/latest',
-        options: Options(headers: {'Accept': 'application/vnd.github.v3+json'}),
+      final response = await http.get(
+        Uri.parse('https://api.github.com/repos/$_repo/releases/latest'),
+        headers: {'Accept': 'application/vnd.github.v3+json'},
       );
 
-      final release = GithubRelease.fromJson(response.data);
+      if (response.statusCode != 200) return null;
+
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      final release = GithubRelease.fromJson(data);
       if (release.tagName.isEmpty) return null;
 
       final packageInfo = await PackageInfo.fromPlatform();
@@ -141,15 +144,23 @@ class OtaUpdateService {
       await file.delete();
     }
 
-    await _dio.download(
-      asset.downloadUrl,
-      filePath,
-      onReceiveProgress: (received, total) {
-        if (total != -1) {
-          onProgress(received / total);
-        }
-      },
-    );
+    final request = http.Request('GET', Uri.parse(asset.downloadUrl));
+    final response = await http.Client().send(request);
+    final contentLength = response.contentLength ?? 0;
+
+    int received = 0;
+    final sink = file.openWrite();
+
+    await for (final chunk in response.stream) {
+      sink.add(chunk);
+      received += chunk.length;
+      if (contentLength > 0) {
+        onProgress(received / contentLength);
+      }
+    }
+
+    await sink.flush();
+    await sink.close();
 
     // Install via native Android Intent + FileProvider
     await _installApk(filePath);

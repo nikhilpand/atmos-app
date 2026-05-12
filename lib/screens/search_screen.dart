@@ -5,7 +5,6 @@ import 'package:flutter_animate/flutter_animate.dart';
 import '../models/media_model.dart';
 import '../providers/providers.dart';
 import '../theme/app_theme.dart';
-import '../theme/app_tokens.dart';
 import '../widgets/media_card.dart';
 
 class SearchScreen extends ConsumerStatefulWidget {

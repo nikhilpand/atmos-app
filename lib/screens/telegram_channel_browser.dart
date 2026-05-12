@@ -128,8 +128,8 @@ class _NotLoggedIn extends StatelessWidget {
           children: [
             Container(
               width: 80, height: 80,
-              decoration: BoxDecoration(
-                gradient: const LinearGradient(
+              decoration: const BoxDecoration(
+                gradient: LinearGradient(
                   colors: [Color(0xFF2AABEE), Color(0xFF229ED9)],
                 ),
                 borderRadius: AppRadius.lgAll,

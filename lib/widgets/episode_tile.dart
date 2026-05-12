@@ -123,7 +123,7 @@ class _EpisodeTileState extends State<EpisodeTile> {
                   // Download button
                   if (widget.onDownload != null) ...[
                     IconButton(
-                      icon: Icon(Icons.download_rounded, size: 20),
+                      icon: const Icon(Icons.download_rounded, size: 20),
                       color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
                       padding: EdgeInsets.zero,
                       constraints: const BoxConstraints(minWidth: 32, minHeight: 32),

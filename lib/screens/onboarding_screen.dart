@@ -101,7 +101,7 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
 
             // Action buttons
             Padding(
-              padding: EdgeInsets.fromLTRB(
+              padding: const EdgeInsets.fromLTRB(
                 AppSpacing.xl, AppSpacing.md,
                 AppSpacing.xl, AppSpacing.xl,
               ),
@@ -155,7 +155,7 @@ class _Page1 extends StatelessWidget {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Text('🎬', style: const TextStyle(fontSize: 80))
+          const Text('🎬', style: TextStyle(fontSize: 80))
               .animate().scale(duration: 600.ms, curve: Curves.elasticOut),
           const SizedBox(height: AppSpacing.xl),
           ShaderMask(
@@ -195,11 +195,11 @@ class _Page2 extends StatelessWidget {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Row(
+          const Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
               _EngineCard(emoji: '✈️', label: 'Telegram', sub: 'CDN · 500 MB/s'),
-              const SizedBox(width: AppSpacing.md),
+              SizedBox(width: AppSpacing.md),
               _EngineCard(emoji: '🎬', label: 'Streaming', sub: '10+ providers'),
             ],
           ).animate().fadeIn(delay: 100.ms).slideY(begin: 0.1, end: 0),

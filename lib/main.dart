@@ -21,7 +21,6 @@ import 'providers/providers.dart';
 import 'screens/home_screen.dart';
 import 'screens/search_screen.dart';
 import 'screens/details_screen.dart';
-// import 'screens/player_screen.dart'; // DEPRECATED — unified native player
 import 'screens/download_screen.dart';
 import 'screens/settings_screen.dart';
 import 'screens/genre_screen.dart';

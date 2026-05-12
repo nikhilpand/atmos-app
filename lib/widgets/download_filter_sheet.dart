@@ -1,5 +1,4 @@
 import 'package:flutter/material.dart';
-import '../theme/app_theme.dart';
 
 // ─── Download Filter ──────────────────────────────────────────────────────────
 
@@ -288,10 +287,10 @@ class _DownloadFilterSheetState extends State<DownloadFilterSheet> {
                   Navigator.pop(context);
                   widget.onConfirm(_filters);
                 },
-                icon: Icon(Icons.search_rounded, size: 18),
+                icon: const Icon(Icons.search_rounded, size: 18),
                 label: Text(
                   _filters.isDefault ? 'Search All' : 'Search with Filters',
-                  style: TextStyle(fontWeight: FontWeight.w700),
+                  style: const TextStyle(fontWeight: FontWeight.w700),
                 ),
                 style: FilledButton.styleFrom(
                   backgroundColor: Theme.of(context).colorScheme.primary,

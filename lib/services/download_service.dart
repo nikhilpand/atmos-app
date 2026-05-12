@@ -6,7 +6,6 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/download_model.dart';
 import 'telegram_service.dart';
-import 'atmos_index_client.dart';
 
 /// Central download engine — Telegram CDN only.
 ///

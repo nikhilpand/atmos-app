@@ -1,5 +1,5 @@
 import 'dart:convert';
-import 'package:dio/dio.dart';
+import 'package:http/http.dart' as http;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 /// OpenSubtitles.com REST API v1 client.
@@ -62,26 +62,20 @@ const subtitleLanguages = <String, String>{
 
 class SubtitleService {
   static const _baseUrl = 'https://api.opensubtitles.com/api/v1';
-  static const _appName = 'Atmos v2.0';
+  static const _appName = 'Atmos v3.0';
 
-  late final Dio _dio;
   String? _apiKey;
-  String? _token;
 
   SubtitleService() {
     _apiKey = dotenv.env['OPENSUBTITLES_API_KEY'];
-    _dio = Dio(BaseOptions(
-      baseUrl: _baseUrl,
-      connectTimeout: const Duration(seconds: 15),
-      receiveTimeout: const Duration(seconds: 20),
-      headers: {
-        'Content-Type': 'application/json',
-        'Accept': 'application/json',
-        'User-Agent': _appName,
-        if (_apiKey != null) 'Api-Key': _apiKey!,
-      },
-    ));
   }
+
+  Map<String, String> get _headers => {
+    'Content-Type': 'application/json',
+    'Accept': 'application/json',
+    'User-Agent': _appName,
+    if (_apiKey != null) 'Api-Key': _apiKey!,
+  };
 
   // ── Search ───────────────────────────────────────────────────────────────────
 
@@ -94,17 +88,20 @@ class SubtitleService {
     int episode = 0,
   }) async {
     try {
-      final params = <String, dynamic>{
+      final params = <String, String>{
         'imdb_id': imdbId.replaceFirst('tt', ''),
         'languages': language,
         'order_by': 'download_count',
         'order_direction': 'desc',
       };
-      if (season > 0) params['season_number'] = season;
-      if (episode > 0) params['episode_number'] = episode;
+      if (season > 0) params['season_number'] = '$season';
+      if (episode > 0) params['episode_number'] = '$episode';
 
-      final res = await _dio.get('/subtitles', queryParameters: params);
-      final data = res.data['data'] as List? ?? [];
+      final uri = Uri.parse('$_baseUrl/subtitles').replace(queryParameters: params);
+      final res = await http.get(uri, headers: _headers);
+      if (res.statusCode != 200) return [];
+      final body = jsonDecode(res.body);
+      final data = body['data'] as List? ?? [];
       return data
           .map((j) => SubtitleTrack.fromJson(j as Map<String, dynamic>))
           .where((t) => t.fileId > 0)
@@ -124,11 +121,14 @@ class SubtitleService {
       return 'https://dl.opensubtitles.org/api/download?file_id=$fileId&sub_format=vtt';
     }
     try {
-      final res = await _dio.post('/download', data: jsonEncode({
-        'file_id': fileId,
-        'sub_format': 'vtt',
-      }));
-      return res.data['link'] as String?;
+      final uri = Uri.parse('$_baseUrl/download');
+      final res = await http.post(uri,
+        headers: _headers,
+        body: jsonEncode({'file_id': fileId, 'sub_format': 'vtt'}),
+      );
+      if (res.statusCode != 200) return null;
+      final body = jsonDecode(res.body);
+      return body['link'] as String?;
     } catch (_) {
       return null;
     }

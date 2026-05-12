@@ -868,9 +868,7 @@ class _StorageBarState extends State<_StorageBar> {
         final taskBytes = task.totalBytes as int? ?? 0;
         if (taskBytes > 0 && used == 0) used += taskBytes;
       }
-      // Device storage via statvfs
-      final stat = await FileStat.stat('/storage/emulated/0');
-      // stat.size is block size; can't get total from FileStat — use path_provider-based approach
+      // Device storage
       final dir = Directory('/storage/emulated/0');
       int total = 32 * 1024 * 1024 * 1024; // default 32 GB
       try {
@@ -908,8 +906,11 @@ class _StorageBarState extends State<_StorageBar> {
     final pct = (ratio * 100).toStringAsFixed(1);
 
     Color barColor = cs.primary;
-    if (ratio > 0.9) barColor = cs.error;
-    else if (ratio > 0.7) barColor = Colors.orange;
+    if (ratio > 0.9) {
+      barColor = cs.error;
+    } else if (ratio > 0.7) {
+      barColor = Colors.orange;
+    }
 
     return ListenableBuilder(
       listenable: widget.service,
