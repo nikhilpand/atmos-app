@@ -109,6 +109,288 @@ class StreamExtractorService {
     return null;
   }
 
+  // ── Direct API extraction (no WebView needed) ──
+
+  /// Videasy: fetch encrypted stream data from api.videasy.net,
+  /// decrypt via enc-dec.app, return best quality m3u8 URL.
+  ///
+  /// Cracked flow (from Videasy's webpack chunk, module 1520):
+  /// 1. GET api.videasy.net/{server}/sources-with-title?title=X&mediaType=Y&tmdbId=Z&imdbId=W
+  ///    → returns hex-encoded encrypted blob
+  /// 2. POST enc-dec.app/api/dec-videasy {text: blob, id: tmdbId}
+  ///    → returns {sources: [{url, quality}], subtitles: [...]}
+  /// 3. Pick highest quality stream
+  ///
+  /// Available servers: mb-flix, meine (German), hdmovie, 1movies, m4uhd
+  Future<ExtractedStream?> extractVideasyDirect({
+    required String tmdbId,
+    required String title,
+    required String type,
+    String imdbId = '',
+    int year = 0,
+    int season = 1,
+    int episode = 1,
+  }) async {
+    // All known Videasy server backends, ordered by reliability
+    const servers = ['mb-flix', 'hdmovie', '1movies', 'm4uhd', 'meine'];
+
+    for (final server in servers) {
+      try {
+        debugPrint('[Extractor] 🔑 Videasy/$server for tmdb=$tmdbId "$title"');
+
+        // Step 1: Build query params matching Videasy's JS
+        final params = {
+          'title': title,
+          'mediaType': type == 'tv' ? 'tv' : 'movie',
+          'tmdbId': tmdbId,
+          if (imdbId.isNotEmpty) 'imdbId': imdbId,
+          if (year > 0) 'year': '$year',
+          if (type == 'tv') 'seasonId': '$season',
+          if (type == 'tv') 'episodeId': '$episode',
+          if (server == 'meine') 'language': 'german',
+        };
+
+        final uri = Uri.parse('https://api.videasy.net/$server/sources-with-title')
+            .replace(queryParameters: params);
+
+        // Step 2: Fetch encrypted stream data
+        final encResp = await http.get(uri, headers: {
+          'User-Agent': _ua,
+          'Referer': 'https://player.videasy.net/',
+          'Origin': 'https://player.videasy.net',
+        }).timeout(const Duration(seconds: 8));
+
+        if (encResp.statusCode != 200 || encResp.body.isEmpty) {
+          debugPrint('[Extractor] Videasy/$server returned ${encResp.statusCode}');
+          continue;
+        }
+
+        final encryptedBlob = encResp.body;
+        // Skip if response is JSON error
+        if (encryptedBlob.startsWith('{')) {
+          debugPrint('[Extractor] Videasy/$server returned JSON error: ${encryptedBlob.substring(0, 100)}');
+          continue;
+        }
+
+        debugPrint('[Extractor] 🔑 Videasy/$server got ${encryptedBlob.length} bytes encrypted');
+
+        // Step 3: Decrypt via enc-dec.app
+        final decResp = await http.post(
+          Uri.parse('https://enc-dec.app/api/dec-videasy'),
+          headers: {'Content-Type': 'application/json', 'User-Agent': _ua},
+          body: jsonEncode({'text': encryptedBlob, 'id': tmdbId}),
+        ).timeout(const Duration(seconds: 10));
+
+        if (decResp.statusCode != 200) {
+          debugPrint('[Extractor] enc-dec.app returned ${decResp.statusCode}');
+          continue;
+        }
+
+        final decData = jsonDecode(decResp.body);
+        if (decData['status'] != 200 || decData['result'] == null) {
+          debugPrint('[Extractor] enc-dec.app failed');
+          continue;
+        }
+
+        // Step 4: Parse decrypted sources
+        final result = decData['result'];
+        Map<String, dynamic> sourcesMap;
+        if (result is String) {
+          sourcesMap = jsonDecode(result) as Map<String, dynamic>;
+        } else if (result is Map) {
+          sourcesMap = Map<String, dynamic>.from(result);
+        } else {
+          continue;
+        }
+
+        final sources = sourcesMap['sources'];
+        if (sources is! List || sources.isEmpty) continue;
+
+        // Pick best quality (prefer 1080p > 720p > 480p > Auto > any)
+        final streamUrl = _pickBestSource(sources);
+        if (streamUrl == null) continue;
+
+        final quality = _getQualityLabel(sources, streamUrl);
+        debugPrint('[Extractor] ✅ Videasy/$server → $quality: ${streamUrl.substring(0, 80)}...');
+        return ExtractedStream(
+          url: streamUrl,
+          headers: {'Referer': 'https://player.videasy.net/', 'User-Agent': _ua},
+          providerName: 'Videasy/$server ${quality.isNotEmpty ? "($quality)" : ""}',
+        );
+      } catch (e) {
+        debugPrint('[Extractor] Videasy/$server failed: $e');
+      }
+    }
+    return null;
+  }
+
+  /// VidAPI: Direct API extraction from streamdata.vaplayer.ru
+  ///
+  /// Cracked flow (from brightpathsignals.com/embed player.min.js):
+  /// 1. GET streamdata.vaplayer.ru/api.php?imdb=X&type=movie (or tmdb=X)
+  ///    → returns {status_code: "200", data: {stream_urls: [url1, url2, ...], title, ...}}
+  /// 2. stream_urls are direct HLS m3u8 links — ZERO encryption
+  /// 3. Multiple quality variants available, first = highest quality
+  ///
+  /// NO server needed — direct HTTP GET, no tokens, no encryption.
+  Future<ExtractedStream?> extractVidAPIDirect({
+    required String imdbId,
+    required String tmdbId,
+    required String type,
+    int season = 1,
+    int episode = 1,
+  }) async {
+    try {
+      debugPrint('[Extractor] 🎯 VidAPI direct for imdb=$imdbId tmdb=$tmdbId');
+
+      // Build API URL — prefer IMDB ID (more reliable), fall back to TMDB
+      final params = <String, String>{};
+      if (imdbId.isNotEmpty && imdbId.startsWith('tt')) {
+        params['imdb'] = imdbId;
+      } else if (tmdbId.isNotEmpty && tmdbId != '0') {
+        params['tmdb'] = tmdbId;
+      } else {
+        return null;
+      }
+      params['type'] = type == 'tv' ? 'tv' : 'movie';
+      if (type == 'tv') {
+        params['season'] = '$season';
+        params['episode'] = '$episode';
+      }
+
+      final uri = Uri.parse('https://streamdata.vaplayer.ru/api.php')
+          .replace(queryParameters: params);
+
+      final resp = await http.get(uri, headers: {
+        'User-Agent': _ua,
+        'Referer': 'https://brightpathsignals.com/',
+        'Origin': 'https://brightpathsignals.com',
+      }).timeout(const Duration(seconds: 10));
+
+      if (resp.statusCode != 200) {
+        debugPrint('[Extractor] VidAPI returned ${resp.statusCode}');
+        return null;
+      }
+
+      final data = jsonDecode(resp.body);
+      final statusCode = data['status_code']?.toString();
+      if (statusCode != '200' || data['data'] == null) {
+        debugPrint('[Extractor] VidAPI status: $statusCode');
+        return null;
+      }
+
+      final streamData = data['data'] as Map<String, dynamic>;
+      final streamUrls = streamData['stream_urls'];
+
+      if (streamUrls is List && streamUrls.isNotEmpty) {
+        // First URL is usually highest quality
+        final url = streamUrls[0].toString();
+        if (url.contains('.m3u8') || url.contains('.mp4')) {
+          final title = streamData['title']?.toString() ?? '';
+          debugPrint('[Extractor] ✅ VidAPI → $title: ${url.substring(0, 80)}...');
+          return ExtractedStream(
+            url: url,
+            headers: {
+              'Referer': 'https://brightpathsignals.com/',
+              'Origin': 'https://brightpathsignals.com',
+              'User-Agent': _ua,
+            },
+            providerName: 'VidAPI (HD)',
+          );
+        }
+      }
+
+      // Fallback: check for single 'file' or 'url' field
+      final file = streamData['file'] ?? streamData['url'] ?? streamData['stream_url'];
+      if (file is String && file.isNotEmpty) {
+        return ExtractedStream(
+          url: file,
+          headers: {'Referer': 'https://brightpathsignals.com/', 'User-Agent': _ua},
+          providerName: 'VidAPI',
+        );
+      }
+    } catch (e) {
+      debugPrint('[Extractor] VidAPI direct failed: $e');
+    }
+    return null;
+  }
+
+  // ── Quality picker helpers ──
+
+  String? _pickBestSource(List sources) {
+    const qualityOrder = ['1080p', '720p', '480p', '360p', 'Auto'];
+    String? bestUrl;
+    int bestRank = qualityOrder.length;
+    for (final s in sources) {
+      if (s is! Map) continue;
+      final q = s['quality']?.toString() ?? '';
+      final url = (s['url'] ?? s['file'] ?? '').toString();
+      if (url.isEmpty) continue;
+      final rank = qualityOrder.indexOf(q);
+      if (rank >= 0 && rank < bestRank) {
+        bestRank = rank;
+        bestUrl = url;
+      } else if (bestUrl == null) {
+        bestUrl = url;
+      }
+    }
+    return bestUrl;
+  }
+
+  String _getQualityLabel(List sources, String url) {
+    for (final s in sources) {
+      if (s is Map && (s['url'] == url || s['file'] == url)) {
+        return s['quality']?.toString() ?? '';
+      }
+    }
+    return '';
+  }
+
+  /// Race Videasy + VidAPI in parallel. Returns first success.
+  /// NO server needed — both are direct HTTP APIs.
+  Future<ExtractedStream?> extractDirectAPIs({
+    required String imdbId,
+    required String tmdbId,
+    required String type,
+    String title = '',
+    int season = 1,
+    int episode = 1,
+  }) async {
+    if ((tmdbId.isEmpty || tmdbId == '0') && (imdbId.isEmpty)) return null;
+
+    // Race both providers in parallel — first non-null wins
+    final completer = Completer<ExtractedStream?>();
+    int pending = 2;
+
+    void onResult(ExtractedStream? result) {
+      if (result != null && !completer.isCompleted) {
+        completer.complete(result);
+      } else {
+        pending--;
+        if (pending == 0 && !completer.isCompleted) {
+          completer.complete(null);
+        }
+      }
+    }
+
+    // Provider 1: VidAPI (fastest — zero encryption, direct HLS)
+    extractVidAPIDirect(
+      imdbId: imdbId, tmdbId: tmdbId, type: type,
+      season: season, episode: episode,
+    ).then(onResult).catchError((_) => onResult(null));
+
+    // Provider 2: Videasy (needs decryption, but wider catalog)
+    extractVideasyDirect(
+      tmdbId: tmdbId, title: title, type: type, imdbId: imdbId,
+      season: season, episode: episode,
+    ).then(onResult).catchError((_) => onResult(null));
+
+    return completer.future.timeout(
+      const Duration(seconds: 15),
+      onTimeout: () => null,
+    );
+  }
+
   // ── Single provider WebView extraction ──
 
   Future<ExtractedStream?> extract({

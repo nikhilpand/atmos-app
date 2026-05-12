@@ -228,7 +228,7 @@ class _DownloadFilterSheetState extends State<DownloadFilterSheet> {
                     Text(
                       widget.title,
                       style: TextStyle(
-                          color: Theme.of(context).colorScheme.onSurfaceVariant.withOpacity(0.7), fontSize: 12),
+                          color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.7), fontSize: 12),
                       overflow: TextOverflow.ellipsis,
                     ),
                   ],
@@ -278,9 +278,9 @@ class _DownloadFilterSheetState extends State<DownloadFilterSheet> {
                 TextButton.icon(
                   onPressed: () => setState(() => _filters = const DownloadFilters()),
                   icon: Icon(Icons.restart_alt_rounded,
-                      size: 16, color: Theme.of(context).colorScheme.onSurfaceVariant.withOpacity(0.7)),
+                      size: 16, color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.7)),
                   label: Text('Reset',
-                      style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant.withOpacity(0.7))),
+                      style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.7))),
                 ),
               const Spacer(),
               FilledButton.icon(

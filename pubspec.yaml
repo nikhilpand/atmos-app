@@ -39,7 +39,6 @@ dependencies:
   shared_preferences: ^2.2.3
   url_launcher: ^6.3.0
   connectivity_plus: ^6.0.3
-  open_file: ^3.3.2
   package_info_plus: ^8.1.2
 
   # WebView for embed-based playback
@@ -67,6 +66,8 @@ dependencies:
   media_kit_video: ^1.2.4
   # Android native codec libs (required for Android playback)
   media_kit_libs_android_video: ^1.3.2
+  screen_brightness: ^2.1.8
+  volume_controller: ^3.5.0
 
 
 dev_dependencies:

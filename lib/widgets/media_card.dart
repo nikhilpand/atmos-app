@@ -58,7 +58,7 @@ class _MediaCardState extends State<MediaCard> {
             boxShadow: _isFocused
                 ? [
                     BoxShadow(
-                      color: Theme.of(context).colorScheme.primary.withOpacity(0.5),
+                      color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.5),
                       blurRadius: 20,
                       spreadRadius: 2,
                     )
@@ -79,7 +79,7 @@ class _MediaCardState extends State<MediaCard> {
                     color: Theme.of(context).colorScheme.surfaceContainerHigh,
                     child: Icon(
                       Icons.movie_outlined,
-                      color: Theme.of(context).colorScheme.onSurfaceVariant.withOpacity(0.7),
+                      color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
                       size: 40,
                     ),
                   ),
@@ -98,7 +98,7 @@ class _MediaCardState extends State<MediaCard> {
                         stops: const [0.55, 1.0],
                         colors: [
                           Colors.transparent,
-                          Colors.black.withOpacity(0.85),
+                          Colors.black.withValues(alpha: 0.85),
                         ],
                       ),
                     ),
@@ -131,14 +131,14 @@ class _MediaCardState extends State<MediaCard> {
                                 ? Icons.movie
                                 : Icons.tv,
                             size: 10,
-                            color: Theme.of(context).colorScheme.onSurfaceVariant.withOpacity(0.7),
+                            color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
                           ),
                           const SizedBox(width: 4),
                           Text(
                             widget.media.year,
                             style: TextStyle(
                               fontSize: isTv ? 11 : 10,
-                              color: Theme.of(context).colorScheme.onSurfaceVariant.withOpacity(0.7),
+                              color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
                             ),
                           ),
                           if (widget.media.voteAverage > 0) ...[
@@ -166,7 +166,7 @@ class _MediaCardState extends State<MediaCard> {
                 if (_isFocused)
                   Positioned.fill(
                     child: Container(
-                      color: Colors.black.withOpacity(0.2),
+                      color: Colors.black.withValues(alpha: 0.2),
                       child: const Center(
                         child: Icon(
                           Icons.play_circle_filled_rounded,

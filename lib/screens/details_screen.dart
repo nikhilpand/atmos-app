@@ -388,7 +388,7 @@ class _Badge extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: [
           if (icon != null) ...[
-            Icon(icon, size: 12, color: color ?? Theme.of(context).colorScheme.onSurfaceVariant.withOpacity(0.7)),
+            Icon(icon, size: 12, color: color ?? Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.7)),
             const SizedBox(width: 4),
           ],
           Text(
@@ -609,7 +609,7 @@ class _PlayButtonState extends ConsumerState<_PlayButton> {
                 backgroundColor: Theme.of(context).colorScheme.surfaceContainer,
                 foregroundColor: Colors.white,
                 padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
-                side: BorderSide(color: Theme.of(context).colorScheme.primary.withOpacity(0.4)),
+                side: BorderSide(color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.4)),
                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
               ),
             ),
@@ -718,7 +718,7 @@ class _CastRow extends StatelessWidget {
                             ? CachedNetworkImageProvider(c.profileUrl)
                             : null,
                         child: c.profileUrl.isEmpty
-                            ? Icon(Icons.person, color: Theme.of(context).colorScheme.onSurfaceVariant.withOpacity(0.7))
+                            ? Icon(Icons.person, color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.7))
                             : null,
                       ),
                       const SizedBox(height: 6),
@@ -819,7 +819,7 @@ class _EpisodesSection extends ConsumerWidget {
                             fontWeight: FontWeight.w600,
                             color: sel
                                 ? Theme.of(context).colorScheme.onSurface
-                                : Theme.of(context).colorScheme.onSurfaceVariant.withOpacity(0.7),
+                                : Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
                           ),
                         ),
                       ),
@@ -837,7 +837,7 @@ class _EpisodesSection extends ConsumerWidget {
             ),
             error: (e, _) => Text(
               'Error loading episodes: $e',
-              style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant.withOpacity(0.7)),
+              style: TextStyle(color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.7)),
             ),
             data: (eps) => Column(
               children: eps.map((ep) {
@@ -990,7 +990,7 @@ class _DownloadSeasonButtonState extends ConsumerState<_DownloadSeasonButton> {
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(20),
                     border: Border.all(
-                      color: cs.primary.withOpacity(0.5),
+                      color: cs.primary.withValues(alpha: 0.5),
                     ),
                   ),
                   child: Row(

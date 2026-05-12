@@ -21,45 +21,45 @@ class UpdateDialog extends ConsumerStatefulWidget {
 
 class _UpdateDialogState extends ConsumerState<UpdateDialog> {
   bool _isDownloading = false;
+  bool _isInstalling = false;
   double _progress = 0.0;
   String? _error;
 
   void _startDownload() async {
-    setState(() {
-      _isDownloading = true;
-      _error = null;
-    });
+    setState(() { _isDownloading = true; _error = null; });
 
     final ota = ref.read(otaUpdateProvider);
     final asset = ota.getBestAsset(widget.release);
 
     if (asset == null) {
-      setState(() {
-        _error = "No compatible APK found for your device.";
-        _isDownloading = false;
-      });
+      setState(() { _error = "No compatible APK found for your device."; _isDownloading = false; });
       return;
     }
 
     try {
       await ota.downloadAndInstall(
         asset,
-        (progress) => setState(() => _progress = progress),
+        (progress) {
+          if (mounted) {
+            setState(() {
+              _progress = progress;
+              if (progress >= 1.0) _isInstalling = true;
+            });
+          }
+        },
       );
-      // If installation is launched, we can close the dialog
       if (mounted) Navigator.pop(context);
     } catch (e) {
-      setState(() {
-        _error = "Failed to download update: $e";
-        _isDownloading = false;
-      });
+      if (mounted) {
+        setState(() { _error = "Update failed: $e"; _isDownloading = false; _isInstalling = false; });
+      }
     }
   }
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    
+
     return AlertDialog(
       title: Row(
         children: [
@@ -72,15 +72,13 @@ class _UpdateDialogState extends ConsumerState<UpdateDialog> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(
-            'Version ${widget.release.tagName} is ready to install.',
-            style: const TextStyle(fontWeight: FontWeight.bold),
-          ),
+          Text('Version ${widget.release.tagName} is ready to install.',
+            style: const TextStyle(fontWeight: FontWeight.bold)),
           const SizedBox(height: 12),
           Container(
             padding: const EdgeInsets.all(12),
             decoration: BoxDecoration(
-              color: cs.surfaceContainerHighest.withOpacity(0.5),
+              color: cs.surfaceContainerHighest.withValues(alpha: 0.5),
               borderRadius: BorderRadius.circular(8),
             ),
             child: ConstrainedBox(
@@ -100,7 +98,7 @@ class _UpdateDialogState extends ConsumerState<UpdateDialog> {
           if (_isDownloading) ...[
             const SizedBox(height: 24),
             LinearProgressIndicator(
-              value: _progress,
+              value: _isInstalling ? null : _progress,
               backgroundColor: cs.primaryContainer,
               color: cs.primary,
               borderRadius: BorderRadius.circular(4),
@@ -108,7 +106,7 @@ class _UpdateDialogState extends ConsumerState<UpdateDialog> {
             const SizedBox(height: 8),
             Center(
               child: Text(
-                '${(_progress * 100).toStringAsFixed(1)}%',
+                _isInstalling ? 'Installing…' : '${(_progress * 100).toStringAsFixed(1)}%',
                 style: Theme.of(context).textTheme.labelSmall,
               ),
             ),
@@ -117,15 +115,11 @@ class _UpdateDialogState extends ConsumerState<UpdateDialog> {
       ),
       actions: [
         if (!_isDownloading)
-          TextButton(
-            onPressed: () => Navigator.pop(context),
-            child: const Text('LATER'),
-          ),
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('LATER')),
         if (!_isDownloading)
-          FilledButton(
-            onPressed: _startDownload,
-            child: const Text('UPDATE NOW'),
-          ),
+          FilledButton(onPressed: _startDownload, child: const Text('UPDATE NOW')),
+        if (_error != null && _isDownloading)
+          FilledButton(onPressed: _startDownload, child: const Text('RETRY')),
       ],
     );
   }

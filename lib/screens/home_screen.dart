@@ -71,7 +71,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           SliverAppBar(
             pinned: true,
             expandedHeight: 0,
-            backgroundColor: cs.surface.withOpacity(0.95),
+            backgroundColor: cs.surface.withValues(alpha: 0.95),
             flexibleSpace: Container(),
             title: Row(
               children: [
@@ -419,7 +419,7 @@ class _HeroBanner extends StatelessWidget {
             decoration: BoxDecoration(
               gradient: LinearGradient(
                 begin: Alignment.topCenter, end: Alignment.bottomCenter,
-                colors: [Colors.black.withOpacity(0.4), Colors.transparent, cs.surface],
+                colors: [Colors.black.withValues(alpha: 0.4), Colors.transparent, cs.surface],
                 stops: const [0.0, 0.35, 1.0],
               ),
             ),
@@ -428,7 +428,7 @@ class _HeroBanner extends StatelessWidget {
             decoration: BoxDecoration(
               gradient: LinearGradient(
                 begin: Alignment.centerLeft, end: Alignment.centerRight,
-                colors: [Colors.black.withOpacity(0.8), Colors.transparent],
+                colors: [Colors.black.withValues(alpha: 0.8), Colors.transparent],
                 stops: const [0.0, 0.6],
               ),
             ),
@@ -553,7 +553,7 @@ class _ContinueWatchingRow extends StatelessWidget {
                                   : 'https://image.tmdb.org/t/p/w342${h.posterPath}',
                               fit: BoxFit.cover, memCacheWidth: 300,
                             ),
-                            Container(color: Colors.black.withOpacity(0.5)),
+                            Container(color: Colors.black.withValues(alpha: 0.5)),
                             Positioned(
                               bottom: 0, left: 0, right: 0,
                               child: Padding(
@@ -568,7 +568,7 @@ class _ContinueWatchingRow extends StatelessWidget {
                                     const SizedBox(height: AppSpacing.xs),
                                     LinearProgressIndicator(
                                       value: h.progressPercent,
-                                      backgroundColor: Colors.white.withOpacity(0.2),
+                                      backgroundColor: Colors.white.withValues(alpha: 0.2),
                                       valueColor: AlwaysStoppedAnimation<Color>(cs.primary),
                                       minHeight: 3,
                                     ),
@@ -654,7 +654,7 @@ class _ErrorBanner extends StatelessWidget {
             style: Theme.of(context).textTheme.titleMedium?.copyWith(color: cs.onErrorContainer, fontWeight: FontWeight.w600)),
           const SizedBox(height: AppSpacing.sm),
           Text(message, textAlign: TextAlign.center, maxLines: 3, overflow: TextOverflow.ellipsis,
-            style: TextStyle(fontSize: 11, color: cs.onErrorContainer.withOpacity(0.8))),
+            style: TextStyle(fontSize: 11, color: cs.onErrorContainer.withValues(alpha: 0.8))),
         ]),
       ),
     );
@@ -721,9 +721,9 @@ class _ResumeBanner extends ConsumerWidget {
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(12),
               gradient: LinearGradient(
-                colors: [cs.primaryContainer, cs.primaryContainer.withOpacity(0.6)],
+                colors: [cs.primaryContainer, cs.primaryContainer.withValues(alpha: 0.6)],
               ),
-              border: Border.all(color: cs.primary.withOpacity(0.3), width: 1),
+              border: Border.all(color: cs.primary.withValues(alpha: 0.3), width: 1),
             ),
             child: Row(
               children: [
@@ -735,7 +735,7 @@ class _ResumeBanner extends ConsumerWidget {
                     children: [
                       Text('Resume downloading',
                           style: TextStyle(fontSize: 11,
-                              color: cs.onPrimaryContainer.withOpacity(0.7))),
+                              color: cs.onPrimaryContainer.withValues(alpha: 0.7))),
                       Text(task.title,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,

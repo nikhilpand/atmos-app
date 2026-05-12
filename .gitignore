@@ -48,3 +48,13 @@ android/*.jks
 android/*.b64
 cloudflare-worker/.dev.vars
 cloudflare-worker/.wrangler/
+
+# Graphify cache
+graphify-out/
+*.graphify_*
+acc*.json
+antigravity_accounts*
+analyzer_output.txt
+chat.md
+implementation_plan.md
+.vscode/

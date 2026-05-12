@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:go_router/go_router.dart';
-import 'package:open_file/open_file.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../models/download_model.dart';
 import '../providers/providers.dart';
 import '../theme/app_theme.dart';
@@ -573,11 +573,13 @@ class _PlayButton extends StatelessWidget {
         child: FilledButton.icon(
           onPressed: () async {
             if (task.filePath != null) {
-              final result = await OpenFile.open(task.filePath!);
-              if (result.type != ResultType.done && context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text('Cannot open file: ${result.message}')),
-                );
+              final uri = Uri.file(task.filePath!);
+              if (!await launchUrl(uri)) {
+                if (context.mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('Cannot open file')),
+                  );
+                }
               }
             }
           },
@@ -807,7 +809,7 @@ class _QualityTile extends StatelessWidget {
             Text(
               option.fileName!,
               style: TextStyle(
-                color: cs.onSurfaceVariant.withOpacity(0.5),
+                color: cs.onSurfaceVariant.withValues(alpha: 0.5),
                 fontSize: 10,
                 fontFamily: 'monospace',
               ),

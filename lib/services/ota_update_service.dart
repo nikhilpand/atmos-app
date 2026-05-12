@@ -1,9 +1,8 @@
-import 'dart:ffi';
 import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:open_file/open_file.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 
@@ -44,6 +43,7 @@ class GithubAsset {
 class OtaUpdateService {
   final Dio _dio = Dio();
   final String _repo = 'nikhilpand/atmos-app';
+  static const _channel = MethodChannel('com.example.atmos/install');
 
   /// Check for updates
   /// Returns [GithubRelease] if an update is available, null otherwise.
@@ -89,21 +89,13 @@ class OtaUpdateService {
 
   /// Finds the best APK asset for the current architecture
   GithubAsset? getBestAsset(GithubRelease release) {
-    final abi = Abi.current();
-    String targetSuffix = '';
-
-    if (abi == Abi.androidArm64) {
-      targetSuffix = 'arm64-v8a';
-    } else if (abi == Abi.androidArm) {
-      targetSuffix = 'armeabi-v7a';
-    } else if (abi == Abi.androidX64) {
-      targetSuffix = 'x86_64';
-    }
-
+    // Detect architecture from platform
+    final arch = _detectArch();
+    
     // Try to find arch-specific APK
-    if (targetSuffix.isNotEmpty) {
+    if (arch.isNotEmpty) {
       for (final asset in release.assets) {
-        if (asset.name.contains(targetSuffix) && asset.name.endsWith('.apk')) {
+        if (asset.name.contains(arch) && asset.name.endsWith('.apk')) {
           return asset;
         }
       }
@@ -123,35 +115,52 @@ class OtaUpdateService {
     return release.assets.where((a) => a.name.endsWith('.apk')).firstOrNull;
   }
 
-  /// Download and prompt installation
+  String _detectArch() {
+    // Use dart:io to detect architecture
+    try {
+      final proc = Process.runSync('getprop', ['ro.product.cpu.abi']);
+      final abi = (proc.stdout as String).trim();
+      if (abi.contains('arm64')) return 'arm64-v8a';
+      if (abi.contains('armeabi')) return 'armeabi-v7a';
+      if (abi.contains('x86_64')) return 'x86_64';
+      if (abi.contains('x86')) return 'x86';
+    } catch (_) {}
+    return 'arm64-v8a'; // Most common default
+  }
+
+  /// Download and install APK via native FileProvider intent
   Future<void> downloadAndInstall(
     GithubAsset asset,
     void Function(double progress) onProgress,
   ) async {
+    final dir = await getExternalStorageDirectory() ?? await getApplicationSupportDirectory();
+    final filePath = '${dir.path}/${asset.name}';
+    final file = File(filePath);
+
+    if (await file.exists()) {
+      await file.delete();
+    }
+
+    await _dio.download(
+      asset.downloadUrl,
+      filePath,
+      onReceiveProgress: (received, total) {
+        if (total != -1) {
+          onProgress(received / total);
+        }
+      },
+    );
+
+    // Install via native Android Intent + FileProvider
+    await _installApk(filePath);
+  }
+
+  /// Calls native Android code to install the APK using FileProvider content:// URI
+  Future<void> _installApk(String filePath) async {
     try {
-      final dir = await getExternalStorageDirectory() ?? await getApplicationSupportDirectory();
-      final filePath = '${dir.path}/${asset.name}';
-      final file = File(filePath);
-
-      if (await file.exists()) {
-        await file.delete();
-      }
-
-      await _dio.download(
-        asset.downloadUrl,
-        filePath,
-        onReceiveProgress: (received, total) {
-          if (total != -1) {
-            onProgress(received / total);
-          }
-        },
-      );
-
-      // Open the downloaded APK
-      final result = await OpenFile.open(filePath, type: 'application/vnd.android.package-archive');
-      debugPrint('OpenFile result: ${result.message}');
-    } catch (e) {
-      debugPrint('Error downloading or installing update: $e');
+      await _channel.invokeMethod('installApk', {'filePath': filePath});
+    } on PlatformException catch (e) {
+      debugPrint('Native install failed: ${e.message}');
       rethrow;
     }
   }

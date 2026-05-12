@@ -42,7 +42,7 @@ class _EpisodeTileState extends State<EpisodeTile> {
           padding: EdgeInsets.all(isTv ? 16 : 12),
           decoration: BoxDecoration(
             color: widget.isSelected
-                ? Theme.of(context).colorScheme.primary.withOpacity(0.15)
+                ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.15)
                 : _isFocused
                     ? Theme.of(context).colorScheme.surfaceContainerHighest
                     : Theme.of(context).colorScheme.surfaceContainerHigh,
@@ -51,7 +51,7 @@ class _EpisodeTileState extends State<EpisodeTile> {
               color: widget.isSelected
                   ? Theme.of(context).colorScheme.primary
                   : _isFocused
-                      ? Theme.of(context).colorScheme.primary.withOpacity(0.5)
+                      ? Theme.of(context).colorScheme.primary.withValues(alpha: 0.5)
                       : Colors.transparent,
               width: 1.5,
             ),
@@ -76,7 +76,7 @@ class _EpisodeTileState extends State<EpisodeTile> {
                               color: Theme.of(context).colorScheme.surfaceContainerHighest,
                               child: Icon(
                                 Icons.play_circle_outline,
-                                color: Theme.of(context).colorScheme.onSurfaceVariant.withOpacity(0.7),
+                                color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
                                 size: 28,
                               ),
                             ),
@@ -113,7 +113,7 @@ class _EpisodeTileState extends State<EpisodeTile> {
                             '${widget.episode.runtime} min',
                             style: TextStyle(
                               fontSize: isTv ? 12 : 11,
-                              color: Theme.of(context).colorScheme.onSurfaceVariant.withOpacity(0.7),
+                              color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
                             ),
                           ),
                         ],
@@ -124,7 +124,7 @@ class _EpisodeTileState extends State<EpisodeTile> {
                   if (widget.onDownload != null) ...[
                     IconButton(
                       icon: Icon(Icons.download_rounded, size: 20),
-                      color: Theme.of(context).colorScheme.onSurfaceVariant.withOpacity(0.7),
+                      color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
                       padding: EdgeInsets.zero,
                       constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
                       onPressed: widget.onDownload,
@@ -140,7 +140,7 @@ class _EpisodeTileState extends State<EpisodeTile> {
                         ? Colors.green
                         : widget.isSelected
                             ? Theme.of(context).colorScheme.primary
-                            : Theme.of(context).colorScheme.onSurfaceVariant.withOpacity(0.7),
+                            : Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
                     size: isTv ? 28 : 22,
                   ),
                 ],
