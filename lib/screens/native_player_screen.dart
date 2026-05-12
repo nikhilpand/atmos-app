@@ -50,7 +50,7 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
 
   // ── Subtitle + Quality state ──
   ExtractedStream? _currentStream;
-  int _activeSubIndex = -1; // -1 = off
+  dynamic _activeSubtitle = -1; // -1 = off, can be int (extracted) or SubtitleTrack (embedded)
   String _activeQuality = '';
 
   // Vertical gesture (brightness/volume)
@@ -194,32 +194,46 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
 
   // ── Subtitle control ──
 
-  void _toggleSubtitle(int index) {
+  void _toggleSubtitle(dynamic subtitle) {
     if (!mounted || _currentStream == null) return;
-    setState(() => _activeSubIndex = index);
-    if (index < 0) {
+    setState(() => _activeSubtitle = subtitle);
+    
+    if (subtitle == -1 || subtitle == SubtitleTrack.no()) {
       _player.setSubtitleTrack(SubtitleTrack.no());
       debugPrint('[Player] Subtitles OFF');
-    } else {
-      final sub = _currentStream!.subtitles[index];
+    } else if (subtitle is int) {
+      final sub = _currentStream!.subtitles[subtitle];
       _player.setSubtitleTrack(SubtitleTrack.uri(sub.url, title: sub.displayLabel, language: sub.lang));
-      debugPrint('[Player] Subtitle: ${sub.displayLabel}');
+      debugPrint('[Player] API Subtitle: ${sub.displayLabel}');
+    } else if (subtitle is SubtitleTrack) {
+      _player.setSubtitleTrack(subtitle);
+      debugPrint('[Player] Embedded Subtitle: ${subtitle.title ?? subtitle.language}');
     }
   }
 
-  void _showSubtitlePicker() {
-    if (_currentStream == null || !_currentStream!.hasSubtitles) return;
+  void _showPlayerSettings() {
     showModalBottomSheet(
       context: context,
       backgroundColor: const Color(0xFF1A1A2E),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      builder: (_) => _SubtitleSheet(
-        subtitles: _currentStream!.subtitles,
-        activeIndex: _activeSubIndex,
-        onSelect: (i) {
-          _toggleSubtitle(i);
+      builder: (_) => _PlayerSettingsSheet(
+        player: _player,
+        stream: _currentStream,
+        activeQuality: _activeQuality,
+        activeSubtitle: _activeSubtitle,
+        onQualitySelect: (q) {
+          _switchQuality(q);
+          Navigator.pop(context);
+        },
+        onSubtitleSelect: (sub) {
+          _toggleSubtitle(sub);
+          Navigator.pop(context);
+        },
+        onAudioSelect: (track) {
+          _player.setAudioTrack(track);
+          setState(() {}); // Rebuild to reflect active track
           Navigator.pop(context);
         },
       ),
@@ -245,31 +259,14 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
     _playStream(newStream, resumeFrom: currentPos);
 
     // Re-apply subtitle if one was active
-    if (_activeSubIndex >= 0) {
+    if (_activeSubtitle != -1) {
       Future.delayed(const Duration(milliseconds: 800), () {
-        _toggleSubtitle(_activeSubIndex);
+        _toggleSubtitle(_activeSubtitle);
       });
     }
   }
 
-  void _showQualityPicker() {
-    if (_currentStream == null || !_currentStream!.hasQualities) return;
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: const Color(0xFF1A1A2E),
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (_) => _QualitySheet(
-        qualities: _currentStream!.qualities,
-        activeQuality: _activeQuality,
-        onSelect: (q) {
-          _switchQuality(q);
-          Navigator.pop(context);
-        },
-      ),
-    );
-  }
+
 
   void _onPositionChanged(Duration pos) {
     final dur = _player.state.duration;
@@ -468,6 +465,7 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
                   child: _state == _ExState.playing
                       ? Video(
                           controller: _controller,
+                          controls: NoVideoControls,
                           fit: _isFitMode ? BoxFit.contain : BoxFit.cover,
                           subtitleViewConfiguration: const SubtitleViewConfiguration(
                             style: TextStyle(
@@ -672,10 +670,6 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
                         playbackSpeed: _playbackSpeed,
                         isFitMode: _isFitMode,
                         isLocked: _isLocked,
-                        hasSubtitles: _currentStream?.hasSubtitles ?? false,
-                        hasQualities: _currentStream?.hasQualities ?? false,
-                        activeSubIndex: _activeSubIndex,
-                        activeQuality: _activeQuality,
                         onBack: () => Navigator.pop(context),
                         onSeekBack: () { _seek(-10); _showSeekAnimation(-1); },
                         onSeekForward: () { _seek(10); _showSeekAnimation(1); },
@@ -683,8 +677,7 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
                         onCycleSpeed: _cycleSpeed,
                         onToggleFit: _toggleFit,
                         onNextEpisode: _type == 'tv' ? _advanceEpisode : null,
-                        onSubtitlePicker: _showSubtitlePicker,
-                        onQualityPicker: _showQualityPicker,
+                        onSettings: _showPlayerSettings,
                       ),
                     ),
                   ),
@@ -834,10 +827,6 @@ class _ControlsOverlay extends StatelessWidget {
   final double playbackSpeed;
   final bool isFitMode;
   final bool isLocked;
-  final bool hasSubtitles;
-  final bool hasQualities;
-  final int activeSubIndex;
-  final String activeQuality;
   final VoidCallback onBack;
   final VoidCallback onSeekBack;
   final VoidCallback onSeekForward;
@@ -845,8 +834,7 @@ class _ControlsOverlay extends StatelessWidget {
   final VoidCallback onCycleSpeed;
   final VoidCallback onToggleFit;
   final VoidCallback? onNextEpisode;
-  final VoidCallback onSubtitlePicker;
-  final VoidCallback onQualityPicker;
+  final VoidCallback onSettings;
 
   const _ControlsOverlay({
     required this.title,
@@ -858,10 +846,6 @@ class _ControlsOverlay extends StatelessWidget {
     required this.playbackSpeed,
     required this.isFitMode,
     required this.isLocked,
-    this.hasSubtitles = false,
-    this.hasQualities = false,
-    this.activeSubIndex = -1,
-    this.activeQuality = '',
     required this.onBack,
     required this.onSeekBack,
     required this.onSeekForward,
@@ -869,8 +853,7 @@ class _ControlsOverlay extends StatelessWidget {
     required this.onCycleSpeed,
     required this.onToggleFit,
     this.onNextEpisode,
-    required this.onSubtitlePicker,
-    required this.onQualityPicker,
+    required this.onSettings,
   });
 
   @override
@@ -1057,26 +1040,14 @@ class _ControlsOverlay extends StatelessWidget {
                                 const SizedBox(width: 6),
                                 Text('-${_fmt(remaining)}', style: const TextStyle(color: Colors.white38, fontSize: 11)),
                                 const Spacer(),
-                                // Subtitle button
-                                if (hasSubtitles)
-                                  _BottomPill(
-                                    icon: activeSubIndex >= 0
-                                        ? Icons.subtitles_rounded
-                                        : Icons.subtitles_off_rounded,
-                                    label: activeSubIndex >= 0 ? 'CC' : 'CC',
-                                    isActive: activeSubIndex >= 0,
-                                    onTap: onSubtitlePicker,
-                                  ),
-                                if (hasSubtitles) const SizedBox(width: 6),
-                                // Quality button
-                                if (hasQualities)
-                                  _BottomPill(
-                                    icon: Icons.high_quality_rounded,
-                                    label: activeQuality.isNotEmpty ? activeQuality : 'AUTO',
-                                    isActive: true,
-                                    onTap: onQualityPicker,
-                                  ),
-                                if (hasQualities) const SizedBox(width: 6),
+                                // Settings button
+                                _BottomPill(
+                                  icon: Icons.settings_rounded,
+                                  label: 'SETTINGS',
+                                  isActive: false,
+                                  onTap: onSettings,
+                                ),
+                                const SizedBox(width: 6),
                                 // Speed pill
                                 GestureDetector(
                                   onTap: onCycleSpeed,
@@ -1214,18 +1185,33 @@ class _BottomPill extends StatelessWidget {
   }
 }
 
-// ─── Subtitle Picker Sheet ────────────────────────────────────────────────────
+// ─── Unified Player Settings Sheet ──────────────────────────────────────────
 
-class _SubtitleSheet extends StatelessWidget {
-  final List<SubtitleInfo> subtitles;
-  final int activeIndex;
-  final ValueChanged<int> onSelect;
+class _PlayerSettingsSheet extends StatefulWidget {
+  final Player player;
+  final ExtractedStream? stream;
+  final String activeQuality;
+  final ValueChanged<QualityOption> onQualitySelect;
+  final ValueChanged<dynamic> onSubtitleSelect; // SubtitleTrack or int
+  final ValueChanged<AudioTrack> onAudioSelect;
+  final dynamic activeSubtitle; // SubtitleTrack or int
 
-  const _SubtitleSheet({
-    required this.subtitles,
-    required this.activeIndex,
-    required this.onSelect,
+  const _PlayerSettingsSheet({
+    required this.player,
+    required this.stream,
+    required this.activeQuality,
+    required this.onQualitySelect,
+    required this.onSubtitleSelect,
+    required this.onAudioSelect,
+    required this.activeSubtitle,
   });
+
+  @override
+  State<_PlayerSettingsSheet> createState() => _PlayerSettingsSheetState();
+}
+
+class _PlayerSettingsSheetState extends State<_PlayerSettingsSheet> {
+  String _activeTab = 'Quality';
 
   static const _langNames = {
     'eng': 'English', 'en': 'English', 'english': 'English',
@@ -1240,94 +1226,12 @@ class _SubtitleSheet extends StatelessWidget {
     'chi': 'Chinese', 'zh': 'Chinese', 'chinese': 'Chinese',
     'ara': 'Arabic', 'ar': 'Arabic', 'arabic': 'Arabic',
     'hin': 'Hindi', 'hi': 'Hindi', 'hindi': 'Hindi',
-    'tur': 'Turkish', 'tr': 'Turkish', 'turkish': 'Turkish',
-    'pol': 'Polish', 'pl': 'Polish', 'dutch': 'Dutch',
-    'dut': 'Dutch', 'nl': 'Dutch', 'nld': 'Dutch',
   };
 
-  String _displayName(SubtitleInfo sub) {
-    if (sub.label.isNotEmpty) return sub.label;
-    return _langNames[sub.lang.toLowerCase()] ?? sub.lang.toUpperCase();
+  String _formatLang(String? lang) {
+    if (lang == null || lang.isEmpty) return 'Unknown';
+    return _langNames[lang.toLowerCase()] ?? lang.toUpperCase();
   }
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Center(
-            child: Container(
-              width: 40, height: 4,
-              decoration: BoxDecoration(
-                color: Colors.white24,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-          const Text('Subtitles',
-              style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
-          const SizedBox(height: 12),
-          // Off option
-          ListTile(
-            dense: true,
-            contentPadding: EdgeInsets.zero,
-            leading: Icon(
-              activeIndex < 0 ? Icons.check_circle : Icons.cancel_outlined,
-              color: activeIndex < 0 ? Colors.deepPurpleAccent : Colors.white54,
-              size: 22,
-            ),
-            title: Text('Off',
-              style: TextStyle(
-                color: activeIndex < 0 ? Colors.deepPurpleAccent : Colors.white,
-                fontWeight: activeIndex < 0 ? FontWeight.w700 : FontWeight.w400,
-              )),
-            onTap: () => onSelect(-1),
-          ),
-          ...List.generate(subtitles.length, (i) {
-            final sub = subtitles[i];
-            final isActive = i == activeIndex;
-            return ListTile(
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(
-                isActive ? Icons.check_circle : Icons.subtitles_outlined,
-                color: isActive ? Colors.deepPurpleAccent : Colors.white54,
-                size: 22,
-              ),
-              title: Text(_displayName(sub),
-                style: TextStyle(
-                  color: isActive ? Colors.deepPurpleAccent : Colors.white,
-                  fontWeight: isActive ? FontWeight.w700 : FontWeight.w400,
-                )),
-              subtitle: sub.lang.isNotEmpty
-                  ? Text(sub.lang.toUpperCase(),
-                      style: const TextStyle(color: Colors.white38, fontSize: 11))
-                  : null,
-              onTap: () => onSelect(i),
-            );
-          }),
-        ],
-      ),
-    );
-  }
-}
-
-// ─── Quality Picker Sheet ─────────────────────────────────────────────────────
-
-class _QualitySheet extends StatelessWidget {
-  final List<QualityOption> qualities;
-  final String activeQuality;
-  final ValueChanged<QualityOption> onSelect;
-
-  const _QualitySheet({
-    required this.qualities,
-    required this.activeQuality,
-    required this.onSelect,
-  });
 
   IconData _qualityIcon(String q) {
     if (q.contains('1080')) return Icons.hd_rounded;
@@ -1338,6 +1242,15 @@ class _QualitySheet extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final audioTracks = widget.player.state.tracks.audio;
+    final embSubTracks = widget.player.state.tracks.subtitle;
+    final extSubTracks = widget.stream?.subtitles ?? [];
+    final qualities = widget.stream?.qualities ?? [];
+
+    final hasAudio = audioTracks.length > 1; // Only show if more than 1 track (or even if 1 to be safe)
+    final hasQualities = qualities.isNotEmpty;
+    final hasSubs = embSubTracks.isNotEmpty || extSubTracks.isNotEmpty;
+
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
       child: Column(
@@ -1347,40 +1260,177 @@ class _QualitySheet extends StatelessWidget {
           Center(
             child: Container(
               width: 40, height: 4,
-              decoration: BoxDecoration(
-                color: Colors.white24,
-                borderRadius: BorderRadius.circular(2),
-              ),
+              decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2)),
             ),
           ),
           const SizedBox(height: 16),
-          const Text('Quality',
-              style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
-          const SizedBox(height: 4),
-          const Text('Higher quality uses more data',
-              style: TextStyle(color: Colors.white38, fontSize: 12)),
-          const SizedBox(height: 12),
-          ...qualities.map((q) {
-            final isActive = q.quality == activeQuality;
-            return ListTile(
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(
-                isActive ? Icons.check_circle : _qualityIcon(q.quality),
-                color: isActive ? Colors.deepPurpleAccent : Colors.white54,
-                size: 22,
-              ),
-              title: Text(q.quality,
-                style: TextStyle(
-                  color: isActive ? Colors.deepPurpleAccent : Colors.white,
-                  fontWeight: isActive ? FontWeight.w700 : FontWeight.w400,
-                  fontSize: 15,
-                )),
-              onTap: () => onSelect(q),
-            );
-          }),
+          // Tabs
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                if (hasQualities) _TabButton(
+                  title: 'Quality',
+                  isActive: _activeTab == 'Quality',
+                  onTap: () => setState(() => _activeTab = 'Quality'),
+                ),
+                if (hasAudio) _TabButton(
+                  title: 'Audio',
+                  isActive: _activeTab == 'Audio',
+                  onTap: () => setState(() => _activeTab = 'Audio'),
+                ),
+                if (hasSubs) _TabButton(
+                  title: 'Subtitles',
+                  isActive: _activeTab == 'Subtitles',
+                  onTap: () => setState(() => _activeTab = 'Subtitles'),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+          // Content
+          ConstrainedBox(
+            constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.5),
+            child: SingleChildScrollView(
+              child: _buildContent(qualities, audioTracks, embSubTracks, extSubTracks),
+            ),
+          ),
         ],
       ),
+    );
+  }
+
+  Widget _buildContent(
+    List<QualityOption> qualities,
+    List<AudioTrack> audioTracks,
+    List<SubtitleTrack> embSubTracks,
+    List<SubtitleInfo> extSubTracks,
+  ) {
+    if (_activeTab == 'Quality') {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: qualities.map((q) {
+          final isActive = q.quality == widget.activeQuality;
+          return _ListTile(
+            icon: _qualityIcon(q.quality),
+            title: q.quality,
+            isActive: isActive,
+            onTap: () => widget.onQualitySelect(q),
+          );
+        }).toList(),
+      );
+    } else if (_activeTab == 'Audio') {
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: audioTracks.map((t) {
+          final isActive = widget.player.state.track.audio == t;
+          final title = t.language ?? t.title ?? 'Audio Track ${t.id}';
+          return _ListTile(
+            icon: Icons.audiotrack_rounded,
+            title: _formatLang(title),
+            isActive: isActive,
+            onTap: () => widget.onAudioSelect(t),
+          );
+        }).toList(),
+      );
+    } else {
+      // Subtitles
+      return Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _ListTile(
+            icon: Icons.cancel_outlined,
+            title: 'Off',
+            isActive: widget.activeSubtitle == -1 || widget.activeSubtitle == SubtitleTrack.no() || widget.activeSubtitle == null,
+            onTap: () => widget.onSubtitleSelect(-1),
+          ),
+          if (embSubTracks.isNotEmpty) ...[
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8),
+              child: Text('Embedded', style: TextStyle(color: Colors.white54, fontSize: 12, fontWeight: FontWeight.bold)),
+            ),
+            ...embSubTracks.where((t) => t.id != 'no').map((t) {
+              final isActive = widget.activeSubtitle == t;
+              final title = t.language ?? t.title ?? 'Subtitle ${t.id}';
+              return _ListTile(
+                icon: Icons.subtitles_outlined,
+                title: _formatLang(title),
+                isActive: isActive,
+                onTap: () => widget.onSubtitleSelect(t),
+              );
+            }),
+          ],
+          if (extSubTracks.isNotEmpty) ...[
+            const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8),
+              child: Text('External', style: TextStyle(color: Colors.white54, fontSize: 12, fontWeight: FontWeight.bold)),
+            ),
+            ...List.generate(extSubTracks.length, (i) {
+              final sub = extSubTracks[i];
+              final isActive = widget.activeSubtitle == i;
+              return _ListTile(
+                icon: Icons.subtitles_outlined,
+                title: sub.label.isNotEmpty ? sub.label : _formatLang(sub.lang),
+                isActive: isActive,
+                onTap: () => widget.onSubtitleSelect(i),
+              );
+            }),
+          ],
+        ],
+      );
+    }
+  }
+}
+
+class _TabButton extends StatelessWidget {
+  final String title;
+  final bool isActive;
+  final VoidCallback onTap;
+  const _TabButton({required this.title, required this.isActive, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        margin: const EdgeInsets.only(right: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        decoration: BoxDecoration(
+          color: isActive ? Colors.deepPurpleAccent : Colors.white12,
+          borderRadius: BorderRadius.circular(20),
+        ),
+        child: Text(title, style: TextStyle(
+          color: isActive ? Colors.white : Colors.white70,
+          fontWeight: FontWeight.w600,
+        )),
+      ),
+    );
+  }
+}
+
+class _ListTile extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final bool isActive;
+  final VoidCallback onTap;
+  const _ListTile({required this.icon, required this.title, required this.isActive, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    return ListTile(
+      dense: true,
+      contentPadding: EdgeInsets.zero,
+      leading: Icon(
+        isActive ? Icons.check_circle : icon,
+        color: isActive ? Colors.deepPurpleAccent : Colors.white54,
+        size: 22,
+      ),
+      title: Text(title, style: TextStyle(
+        color: isActive ? Colors.deepPurpleAccent : Colors.white,
+        fontWeight: isActive ? FontWeight.w700 : FontWeight.w400,
+        fontSize: 15,
+      )),
+      onTap: onTap,
     );
   }
 }
