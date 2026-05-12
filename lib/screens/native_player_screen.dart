@@ -9,26 +9,6 @@ import 'package:volume_controller/volume_controller.dart';
 import '../services/stream_extractor_service.dart';
 import '../providers/providers.dart';
 
-// ─── Embed providers (Videasy + VidAPI only — tested reliable) ───────────────
-//
-// Provider status:
-//   ✅ Videasy     — API cracked, encrypted via enc-dec.app
-//   ✅ VidAPI      — API cracked, direct HLS from streamdata.vaplayer.ru
-//   WebView fallback only fires if both direct APIs fail
-
-List<(String, String)> _buildSourceList(
-    String type, String imdbId, String tmdbId, int season, int episode) {
-  final tvSources = [
-    ('Videasy', 'https://player.videasy.net/tv/$imdbId/$season/$episode'),
-    ('VidAPI', 'https://vaplayer.ru/embed/tv/$imdbId/$season/$episode'),
-  ];
-  final movieSources = [
-    ('Videasy', 'https://player.videasy.net/movie/$imdbId'),
-    ('VidAPI', 'https://vaplayer.ru/embed/movie/$imdbId'),
-  ];
-  return type == 'tv' ? tvSources : movieSources;
-}
-
 // ─── State ────────────────────────────────────────────────────────────────────
 
 enum _ExState { extracting, playing, failed }
@@ -134,7 +114,7 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
   Future<void> _startExtraction() async {
     setState(() {
       _state = _ExState.extracting;
-      _statusMsg = 'Connecting to server…';
+      _statusMsg = 'Finding best stream…';
       _providerBadge = '';
       _hasAdvanced = false;
     });
@@ -142,7 +122,7 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
     debugPrint('[NativePlayer] type=$_type imdbId=$_imdbId tmdbId=$_tmdbId S$_season E$_episode');
 
     // ── Step 1: Try Cloudflare Worker API (fast, ~2s) ──
-    if (mounted) setState(() => _statusMsg = 'Resolving via server…');
+    if (mounted) setState(() => _statusMsg = 'Resolving stream…');
 
     final workerStream = await _extractor.extractViaWorker(
       imdbId: _imdbId,
@@ -153,14 +133,10 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
     );
 
     if (!mounted) return;
+    if (workerStream != null) { _playStream(workerStream); return; }
 
-    if (workerStream != null) {
-      _playStream(workerStream);
-      return;
-    }
-
-    // ── Step 2: Direct API extraction (Videasy/VidLink/VidFast, ~3s) ──
-    if (mounted) setState(() => _statusMsg = 'Decrypting provider APIs…');
+    // ── Step 2: Direct API (VidAPI + Videasy race, ~2-5s) ──
+    if (mounted) setState(() => _statusMsg = 'Extracting from providers…');
 
     final directStream = await _extractor.extractDirectAPIs(
       imdbId: _imdbId,
@@ -172,34 +148,13 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
     );
 
     if (!mounted) return;
+    if (directStream != null) { _playStream(directStream); return; }
 
-    if (directStream != null) {
-      _playStream(directStream);
-      return;
-    }
-
-    // ── Step 3: On-device WebView extraction (fallback) ──
-    if (mounted) setState(() => _statusMsg = 'Scanning providers…');
-
-    final sources = _buildSourceList(_type, _imdbId, _tmdbId, _season, _episode);
-    final stream = await _extractor.extractBestFrom(
-      sources,
-      onStatusUpdate: (status) {
-        if (mounted) setState(() => _statusMsg = status);
-      },
-    );
-
-    if (!mounted) return;
-
-    if (stream == null) {
-      setState(() {
-        _state = _ExState.failed;
-        _failedMsg = 'Could not extract stream from any provider.\nTap Retry to try again.';
-      });
-      return;
-    }
-
-    _playStream(stream);
+    // ── Failed ──
+    setState(() {
+      _state = _ExState.failed;
+      _failedMsg = 'No streams available.\nTap Retry to try again.';
+    });
   }
 
   void _playStream(ExtractedStream stream, {Duration? resumeFrom}) async {
@@ -470,78 +425,6 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
     return h > 0 ? '$h:$m:$s' : '$m:$s';
   }
 
-  void _showSourcePicker() {
-    final sources = _buildSourceList(_type, _imdbId, _tmdbId, _season, _episode);
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      builder: (_) => Container(
-        decoration: const BoxDecoration(
-          color: Color(0xFF1A1A1A),
-          borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-        ),
-        padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Center(
-              child: Container(
-                width: 40, height: 4,
-                decoration: BoxDecoration(
-                  color: Colors.white24,
-                  borderRadius: BorderRadius.circular(2),
-                ),
-              ),
-            ),
-            const SizedBox(height: 16),
-            const Text('Switch Source',
-                style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
-            const SizedBox(height: 4),
-            Text('Current: $_providerBadge',
-                style: const TextStyle(color: Colors.white38, fontSize: 12)),
-            const SizedBox(height: 12),
-            ...sources.map((s) => ListTile(
-              dense: true,
-              contentPadding: EdgeInsets.zero,
-              leading: Icon(
-                s.$1 == _providerBadge ? Icons.check_circle : Icons.play_circle_outline,
-                color: s.$1 == _providerBadge ? Colors.deepPurpleAccent : Colors.white54,
-                size: 22,
-              ),
-              title: Text(s.$1,
-                  style: TextStyle(
-                    color: s.$1 == _providerBadge ? Colors.deepPurpleAccent : Colors.white,
-                    fontWeight: s.$1 == _providerBadge ? FontWeight.w700 : FontWeight.w400,
-                  )),
-              onTap: () {
-                Navigator.pop(context);
-                _trySpecificSource(s.$1, s.$2);
-              },
-            )),
-          ],
-        ),
-      ),
-    );
-  }
-
-  void _trySpecificSource(String name, String url) async {
-    setState(() {
-      _state = _ExState.extracting;
-      _statusMsg = 'Trying $name…';
-    });
-    final stream = await _extractor.extract(url: url, providerName: name);
-    if (!mounted) return;
-    if (stream != null) {
-      _playStream(stream);
-    } else {
-      setState(() {
-        _state = _ExState.failed;
-        _failedMsg = '$name failed to extract.\nTry another source.';
-      });
-    }
-  }
-
   // ── Build ──
 
   @override
@@ -756,7 +639,6 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
                     onBack: () => Navigator.pop(context),
                     onSeekBack: () { _seek(-10); _showSeekAnimation(-1); },
                     onSeekForward: () { _seek(10); _showSeekAnimation(1); },
-                    onSwitchSource: _showSourcePicker,
                     onLock: _toggleLock,
                     onCycleSpeed: _cycleSpeed,
                     onToggleFit: _toggleFit,
@@ -917,7 +799,6 @@ class _ControlsOverlay extends StatelessWidget {
   final VoidCallback onBack;
   final VoidCallback onSeekBack;
   final VoidCallback onSeekForward;
-  final VoidCallback onSwitchSource;
   final VoidCallback onLock;
   final VoidCallback onCycleSpeed;
   final VoidCallback onToggleFit;
@@ -942,7 +823,6 @@ class _ControlsOverlay extends StatelessWidget {
     required this.onBack,
     required this.onSeekBack,
     required this.onSeekForward,
-    required this.onSwitchSource,
     required this.onLock,
     required this.onCycleSpeed,
     required this.onToggleFit,
@@ -999,29 +879,18 @@ class _ControlsOverlay extends StatelessWidget {
                       onTap: onToggleFit,
                       tooltip: isFitMode ? 'Fill' : 'Fit',
                     ),
-                    // Provider badge
+                    // Provider badge (info only)
                     if (providerName.isNotEmpty)
-                      GestureDetector(
-                        onTap: onSwitchSource,
-                        child: Container(
-                          margin: const EdgeInsets.only(left: 6),
-                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                          decoration: BoxDecoration(
-                            color: Colors.deepPurpleAccent.withValues(alpha: 0.25),
-                            borderRadius: BorderRadius.circular(4),
-                            border: Border.all(color: Colors.deepPurpleAccent.withValues(alpha: 0.5)),
-                          ),
-                          child: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Text(providerName.toUpperCase(),
-                                style: const TextStyle(color: Colors.deepPurpleAccent, fontSize: 9,
-                                  fontWeight: FontWeight.w700, letterSpacing: 0.8)),
-                              const SizedBox(width: 3),
-                              const Icon(Icons.swap_horiz, color: Colors.deepPurpleAccent, size: 12),
-                            ],
-                          ),
+                      Container(
+                        margin: const EdgeInsets.only(left: 6),
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.deepPurpleAccent.withValues(alpha: 0.15),
+                          borderRadius: BorderRadius.circular(4),
                         ),
+                        child: Text(providerName.toUpperCase(),
+                          style: const TextStyle(color: Colors.deepPurpleAccent, fontSize: 9,
+                            fontWeight: FontWeight.w700, letterSpacing: 0.8)),
                       ),
                   ],
                 ),
@@ -1146,7 +1015,7 @@ class _ControlsOverlay extends StatelessWidget {
                                           : Colors.white.withValues(alpha: 0.1),
                                       borderRadius: BorderRadius.circular(4),
                                     ),
-                                    child: Text('${playbackSpeed}×',
+                                    child: Text('$playbackSpeed×',
                                       style: TextStyle(
                                         color: playbackSpeed != 1.0 ? Colors.white : Colors.white70,
                                         fontSize: 11, fontWeight: FontWeight.w600,
