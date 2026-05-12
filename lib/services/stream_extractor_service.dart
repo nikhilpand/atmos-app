@@ -5,23 +5,54 @@ import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:flutter_inappwebview/flutter_inappwebview.dart';
 
+/// A single subtitle track from a provider
+class SubtitleInfo {
+  final String url;
+  final String lang;    // e.g. "eng", "spa"
+  final String label;   // e.g. "English", "Spanish"
+
+  const SubtitleInfo({required this.url, required this.lang, this.label = ''});
+
+  String get displayLabel => label.isNotEmpty ? label : lang.toUpperCase();
+
+  @override
+  String toString() => 'SubtitleInfo($lang → $url)';
+}
+
+/// A quality variant (separate stream URL per resolution)
+class QualityOption {
+  final String quality;  // e.g. "1080p", "720p"
+  final String url;
+
+  const QualityOption({required this.quality, required this.url});
+
+  @override
+  String toString() => 'QualityOption($quality)';
+}
+
 /// Extracted stream result
 class ExtractedStream {
   final String url;
   final Map<String, String> headers;
   final String providerName;
+  final List<SubtitleInfo> subtitles;
+  final List<QualityOption> qualities;
 
   const ExtractedStream({
     required this.url,
     required this.headers,
     required this.providerName,
+    this.subtitles = const [],
+    this.qualities = const [],
   });
 
   bool get isHls => url.contains('.m3u8') || url.contains('mpegurl');
   bool get isMp4 => url.contains('.mp4') || url.contains('.mkv');
+  bool get hasSubtitles => subtitles.isNotEmpty;
+  bool get hasQualities => qualities.length > 1;
 
   @override
-  String toString() => 'ExtractedStream($providerName → $url)';
+  String toString() => 'ExtractedStream($providerName → $url, ${subtitles.length} subs, ${qualities.length} qualities)';
 }
 
 // ─── JS: Auto-click play buttons & server selectors ──────────────────────────
@@ -206,16 +237,42 @@ class StreamExtractorService {
         final sources = sourcesMap['sources'];
         if (sources is! List || sources.isEmpty) continue;
 
+        // Build quality options list
+        final qualities = <QualityOption>[];
+        for (final s in sources) {
+          if (s is! Map) continue;
+          final q = s['quality']?.toString() ?? 'Auto';
+          final u = (s['url'] ?? s['file'] ?? '').toString();
+          if (u.isNotEmpty) qualities.add(QualityOption(quality: q, url: u));
+        }
+
+        // Parse subtitles
+        final subs = <SubtitleInfo>[];
+        final subtitlesRaw = sourcesMap['subtitles'];
+        if (subtitlesRaw is List) {
+          for (final sub in subtitlesRaw) {
+            if (sub is! Map) continue;
+            final subUrl = (sub['url'] ?? sub['file'] ?? '').toString();
+            final lang = (sub['lang'] ?? sub['language'] ?? '').toString();
+            final label = (sub['label'] ?? '').toString();
+            if (subUrl.isNotEmpty) {
+              subs.add(SubtitleInfo(url: subUrl, lang: lang, label: label));
+            }
+          }
+        }
+
         // Pick best quality (prefer 1080p > 720p > 480p > Auto > any)
         final streamUrl = _pickBestSource(sources);
         if (streamUrl == null) continue;
 
         final quality = _getQualityLabel(sources, streamUrl);
-        debugPrint('[Extractor] ✅ Videasy/$server → $quality: ${streamUrl.substring(0, 80)}...');
+        debugPrint('[Extractor] ✅ Videasy/$server → $quality, ${subs.length} subs, ${qualities.length} qualities');
         return ExtractedStream(
           url: streamUrl,
           headers: {'Referer': 'https://player.videasy.net/', 'User-Agent': _ua},
           providerName: 'Videasy/$server ${quality.isNotEmpty ? "($quality)" : ""}',
+          subtitles: subs,
+          qualities: qualities,
         );
       } catch (e) {
         debugPrint('[Extractor] Videasy/$server failed: $e');
@@ -283,11 +340,33 @@ class StreamExtractorService {
       final streamUrls = streamData['stream_urls'];
 
       if (streamUrls is List && streamUrls.isNotEmpty) {
-        // First URL is usually highest quality
+        // Build quality options from stream URLs
+        // VidAPI returns 4 URLs: 1080p, 720p, 480p, SD (based on HLS manifest analysis)
+        const qualityLabels = ['1080p', '720p', '480p', 'SD'];
+        final qualities = <QualityOption>[];
+        for (int i = 0; i < streamUrls.length; i++) {
+          final u = streamUrls[i].toString();
+          if (u.isEmpty) continue;
+          final label = i < qualityLabels.length ? qualityLabels[i] : 'Stream ${i + 1}';
+          qualities.add(QualityOption(quality: label, url: u));
+        }
+
+        // Parse subtitles from default_subs
+        final subs = <SubtitleInfo>[];
+        final defaultSubs = data['default_subs'];
+        if (defaultSubs is List) {
+          for (final sub in defaultSubs) {
+            if (sub is! Map) continue;
+            final subUrl = (sub['url'] ?? sub['file'] ?? '').toString();
+            final lang = (sub['lang'] ?? sub['label'] ?? '').toString();
+            if (subUrl.isNotEmpty) subs.add(SubtitleInfo(url: subUrl, lang: lang));
+          }
+        }
+
         final url = streamUrls[0].toString();
         if (url.contains('.m3u8') || url.contains('.mp4')) {
           final title = streamData['title']?.toString() ?? '';
-          debugPrint('[Extractor] ✅ VidAPI → $title: ${url.substring(0, 80)}...');
+          debugPrint('[Extractor] ✅ VidAPI → $title, ${qualities.length} qualities, ${subs.length} subs');
           return ExtractedStream(
             url: url,
             headers: {
@@ -296,6 +375,8 @@ class StreamExtractorService {
               'User-Agent': _ua,
             },
             providerName: 'VidAPI (HD)',
+            subtitles: subs,
+            qualities: qualities,
           );
         }
       }

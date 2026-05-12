@@ -67,6 +67,11 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
   bool _isFitMode = true; // true=fit, false=fill
   bool _longPressing = false; // 2x speed while held
 
+  // ── Subtitle + Quality state ──
+  ExtractedStream? _currentStream;
+  int _activeSubIndex = -1; // -1 = off
+  String _activeQuality = '';
+
   // Vertical gesture (brightness/volume)
   bool _isDraggingVertical = false;
   bool _isBrightnessGesture = false; // left=brightness, right=volume
@@ -197,11 +202,15 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
     _playStream(stream);
   }
 
-  void _playStream(ExtractedStream stream) async {
+  void _playStream(ExtractedStream stream, {Duration? resumeFrom}) async {
     setState(() {
       _state = _ExState.playing;
       _statusMsg = 'Playing via ${stream.providerName}';
       _providerBadge = stream.providerName;
+      _currentStream = stream;
+      if (_activeQuality.isEmpty && stream.hasQualities) {
+        _activeQuality = stream.qualities.first.quality;
+      }
     });
 
     await _player.open(Media(
@@ -209,8 +218,94 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
       httpHeaders: stream.headers,
     ));
 
+    // Resume position if switching quality
+    if (resumeFrom != null && resumeFrom.inSeconds > 0) {
+      // Wait for player to be ready then seek
+      await Future.delayed(const Duration(milliseconds: 500));
+      await _player.seek(resumeFrom);
+    }
+
     // Track progress for history + auto-advance
     _player.stream.position.listen(_onPositionChanged);
+  }
+
+  // ── Subtitle control ──
+
+  void _toggleSubtitle(int index) {
+    if (!mounted || _currentStream == null) return;
+    setState(() => _activeSubIndex = index);
+    if (index < 0) {
+      _player.setSubtitleTrack(SubtitleTrack.no());
+      debugPrint('[Player] Subtitles OFF');
+    } else {
+      final sub = _currentStream!.subtitles[index];
+      _player.setSubtitleTrack(SubtitleTrack.uri(sub.url, title: sub.displayLabel, language: sub.lang));
+      debugPrint('[Player] Subtitle: ${sub.displayLabel}');
+    }
+  }
+
+  void _showSubtitlePicker() {
+    if (_currentStream == null || !_currentStream!.hasSubtitles) return;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1A1A2E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) => _SubtitleSheet(
+        subtitles: _currentStream!.subtitles,
+        activeIndex: _activeSubIndex,
+        onSelect: (i) {
+          _toggleSubtitle(i);
+          Navigator.pop(context);
+        },
+      ),
+    );
+  }
+
+  // ── Quality control ──
+
+  void _switchQuality(QualityOption quality) {
+    if (_currentStream == null || quality.url == _currentStream!.url) return;
+    final currentPos = _player.state.position;
+    debugPrint('[Player] Switching to ${quality.quality} at ${currentPos.inSeconds}s');
+
+    final newStream = ExtractedStream(
+      url: quality.url,
+      headers: _currentStream!.headers,
+      providerName: _currentStream!.providerName.replaceAll(RegExp(r'\(.*?\)'), '(${quality.quality})'),
+      subtitles: _currentStream!.subtitles,
+      qualities: _currentStream!.qualities,
+    );
+
+    setState(() => _activeQuality = quality.quality);
+    _playStream(newStream, resumeFrom: currentPos);
+
+    // Re-apply subtitle if one was active
+    if (_activeSubIndex >= 0) {
+      Future.delayed(const Duration(milliseconds: 800), () {
+        _toggleSubtitle(_activeSubIndex);
+      });
+    }
+  }
+
+  void _showQualityPicker() {
+    if (_currentStream == null || !_currentStream!.hasQualities) return;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1A1A2E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (_) => _QualitySheet(
+        qualities: _currentStream!.qualities,
+        activeQuality: _activeQuality,
+        onSelect: (q) {
+          _switchQuality(q);
+          Navigator.pop(context);
+        },
+      ),
+    );
   }
 
   void _onPositionChanged(Duration pos) {
@@ -654,6 +749,10 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
                     playbackSpeed: _playbackSpeed,
                     isFitMode: _isFitMode,
                     isLocked: _isLocked,
+                    hasSubtitles: _currentStream?.hasSubtitles ?? false,
+                    hasQualities: _currentStream?.hasQualities ?? false,
+                    activeSubIndex: _activeSubIndex,
+                    activeQuality: _activeQuality,
                     onBack: () => Navigator.pop(context),
                     onSeekBack: () { _seek(-10); _showSeekAnimation(-1); },
                     onSeekForward: () { _seek(10); _showSeekAnimation(1); },
@@ -662,6 +761,8 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
                     onCycleSpeed: _cycleSpeed,
                     onToggleFit: _toggleFit,
                     onNextEpisode: _type == 'tv' ? _advanceEpisode : null,
+                    onSubtitlePicker: _showSubtitlePicker,
+                    onQualityPicker: _showQualityPicker,
                   ),
               ],
             ),
@@ -809,6 +910,10 @@ class _ControlsOverlay extends StatelessWidget {
   final double playbackSpeed;
   final bool isFitMode;
   final bool isLocked;
+  final bool hasSubtitles;
+  final bool hasQualities;
+  final int activeSubIndex;
+  final String activeQuality;
   final VoidCallback onBack;
   final VoidCallback onSeekBack;
   final VoidCallback onSeekForward;
@@ -817,6 +922,8 @@ class _ControlsOverlay extends StatelessWidget {
   final VoidCallback onCycleSpeed;
   final VoidCallback onToggleFit;
   final VoidCallback? onNextEpisode;
+  final VoidCallback onSubtitlePicker;
+  final VoidCallback onQualityPicker;
 
   const _ControlsOverlay({
     required this.title,
@@ -828,6 +935,10 @@ class _ControlsOverlay extends StatelessWidget {
     required this.playbackSpeed,
     required this.isFitMode,
     required this.isLocked,
+    this.hasSubtitles = false,
+    this.hasQualities = false,
+    this.activeSubIndex = -1,
+    this.activeQuality = '',
     required this.onBack,
     required this.onSeekBack,
     required this.onSeekForward,
@@ -836,6 +947,8 @@ class _ControlsOverlay extends StatelessWidget {
     required this.onCycleSpeed,
     required this.onToggleFit,
     this.onNextEpisode,
+    required this.onSubtitlePicker,
+    required this.onQualityPicker,
   });
 
   @override
@@ -1002,6 +1115,26 @@ class _ControlsOverlay extends StatelessWidget {
                                 const SizedBox(width: 6),
                                 Text('-${_fmt(remaining)}', style: const TextStyle(color: Colors.white38, fontSize: 11)),
                                 const Spacer(),
+                                // Subtitle button
+                                if (hasSubtitles)
+                                  _BottomPill(
+                                    icon: activeSubIndex >= 0
+                                        ? Icons.subtitles_rounded
+                                        : Icons.subtitles_off_rounded,
+                                    label: activeSubIndex >= 0 ? 'CC' : 'CC',
+                                    isActive: activeSubIndex >= 0,
+                                    onTap: onSubtitlePicker,
+                                  ),
+                                if (hasSubtitles) const SizedBox(width: 6),
+                                // Quality button
+                                if (hasQualities)
+                                  _BottomPill(
+                                    icon: Icons.high_quality_rounded,
+                                    label: activeQuality.isNotEmpty ? activeQuality : 'AUTO',
+                                    isActive: true,
+                                    onTap: onQualityPicker,
+                                  ),
+                                if (hasQualities) const SizedBox(width: 6),
                                 // Speed pill
                                 GestureDetector(
                                   onTap: onCycleSpeed,
@@ -1092,3 +1225,220 @@ class _SeekButton extends StatelessWidget {
   }
 }
 
+// ─── Bottom Pill Button (Subtitle / Quality / Speed) ──────────────────────────
+
+class _BottomPill extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool isActive;
+  final VoidCallback onTap;
+
+  const _BottomPill({
+    required this.icon,
+    required this.label,
+    required this.isActive,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        decoration: BoxDecoration(
+          color: isActive
+              ? Colors.deepPurpleAccent.withValues(alpha: 0.25)
+              : Colors.white.withValues(alpha: 0.1),
+          borderRadius: BorderRadius.circular(4),
+          border: isActive
+              ? Border.all(color: Colors.deepPurpleAccent.withValues(alpha: 0.5), width: 0.5)
+              : null,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, color: isActive ? Colors.deepPurpleAccent : Colors.white70, size: 14),
+            const SizedBox(width: 4),
+            Text(label,
+              style: TextStyle(
+                color: isActive ? Colors.deepPurpleAccent : Colors.white70,
+                fontSize: 10, fontWeight: FontWeight.w600,
+              )),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Subtitle Picker Sheet ────────────────────────────────────────────────────
+
+class _SubtitleSheet extends StatelessWidget {
+  final List<SubtitleInfo> subtitles;
+  final int activeIndex;
+  final ValueChanged<int> onSelect;
+
+  const _SubtitleSheet({
+    required this.subtitles,
+    required this.activeIndex,
+    required this.onSelect,
+  });
+
+  static const _langNames = {
+    'eng': 'English', 'en': 'English', 'english': 'English',
+    'spa': 'Spanish', 'es': 'Spanish', 'spanish': 'Spanish',
+    'fre': 'French', 'fr': 'French', 'french': 'French',
+    'ger': 'German', 'de': 'German', 'german': 'German',
+    'ita': 'Italian', 'it': 'Italian', 'italian': 'Italian',
+    'por': 'Portuguese', 'pt': 'Portuguese', 'portuguese': 'Portuguese',
+    'rus': 'Russian', 'ru': 'Russian', 'russian': 'Russian',
+    'jpn': 'Japanese', 'ja': 'Japanese', 'japanese': 'Japanese',
+    'kor': 'Korean', 'ko': 'Korean', 'korean': 'Korean',
+    'chi': 'Chinese', 'zh': 'Chinese', 'chinese': 'Chinese',
+    'ara': 'Arabic', 'ar': 'Arabic', 'arabic': 'Arabic',
+    'hin': 'Hindi', 'hi': 'Hindi', 'hindi': 'Hindi',
+    'tur': 'Turkish', 'tr': 'Turkish', 'turkish': 'Turkish',
+    'pol': 'Polish', 'pl': 'Polish', 'dutch': 'Dutch',
+    'dut': 'Dutch', 'nl': 'Dutch', 'nld': 'Dutch',
+  };
+
+  String _displayName(SubtitleInfo sub) {
+    if (sub.label.isNotEmpty) return sub.label;
+    return _langNames[sub.lang.toLowerCase()] ?? sub.lang.toUpperCase();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Center(
+            child: Container(
+              width: 40, height: 4,
+              decoration: BoxDecoration(
+                color: Colors.white24,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          const Text('Subtitles',
+              style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 12),
+          // Off option
+          ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(
+              activeIndex < 0 ? Icons.check_circle : Icons.cancel_outlined,
+              color: activeIndex < 0 ? Colors.deepPurpleAccent : Colors.white54,
+              size: 22,
+            ),
+            title: Text('Off',
+              style: TextStyle(
+                color: activeIndex < 0 ? Colors.deepPurpleAccent : Colors.white,
+                fontWeight: activeIndex < 0 ? FontWeight.w700 : FontWeight.w400,
+              )),
+            onTap: () => onSelect(-1),
+          ),
+          ...List.generate(subtitles.length, (i) {
+            final sub = subtitles[i];
+            final isActive = i == activeIndex;
+            return ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(
+                isActive ? Icons.check_circle : Icons.subtitles_outlined,
+                color: isActive ? Colors.deepPurpleAccent : Colors.white54,
+                size: 22,
+              ),
+              title: Text(_displayName(sub),
+                style: TextStyle(
+                  color: isActive ? Colors.deepPurpleAccent : Colors.white,
+                  fontWeight: isActive ? FontWeight.w700 : FontWeight.w400,
+                )),
+              subtitle: sub.lang.isNotEmpty
+                  ? Text(sub.lang.toUpperCase(),
+                      style: const TextStyle(color: Colors.white38, fontSize: 11))
+                  : null,
+              onTap: () => onSelect(i),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+}
+
+// ─── Quality Picker Sheet ─────────────────────────────────────────────────────
+
+class _QualitySheet extends StatelessWidget {
+  final List<QualityOption> qualities;
+  final String activeQuality;
+  final ValueChanged<QualityOption> onSelect;
+
+  const _QualitySheet({
+    required this.qualities,
+    required this.activeQuality,
+    required this.onSelect,
+  });
+
+  IconData _qualityIcon(String q) {
+    if (q.contains('1080')) return Icons.hd_rounded;
+    if (q.contains('720')) return Icons.hd_outlined;
+    if (q.contains('480')) return Icons.sd_rounded;
+    return Icons.play_circle_outline;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Center(
+            child: Container(
+              width: 40, height: 4,
+              decoration: BoxDecoration(
+                color: Colors.white24,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          const Text('Quality',
+              style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
+          const SizedBox(height: 4),
+          const Text('Higher quality uses more data',
+              style: TextStyle(color: Colors.white38, fontSize: 12)),
+          const SizedBox(height: 12),
+          ...qualities.map((q) {
+            final isActive = q.quality == activeQuality;
+            return ListTile(
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(
+                isActive ? Icons.check_circle : _qualityIcon(q.quality),
+                color: isActive ? Colors.deepPurpleAccent : Colors.white54,
+                size: 22,
+              ),
+              title: Text(q.quality,
+                style: TextStyle(
+                  color: isActive ? Colors.deepPurpleAccent : Colors.white,
+                  fontWeight: isActive ? FontWeight.w700 : FontWeight.w400,
+                  fontSize: 15,
+                )),
+              onTap: () => onSelect(q),
+            );
+          }),
+        ],
+      ),
+    );
+  }
+}
