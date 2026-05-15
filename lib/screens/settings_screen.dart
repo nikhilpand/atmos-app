@@ -95,179 +95,184 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         title: const Text('Settings'),
       ),
       body: ListView(
-        padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm),
+        padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm, horizontal: AppSpacing.md),
         children: [
-          // ── Appearance ─────────────────────────────────────────────
-          const _SectionHeader('Appearance'),
-          _AppearanceSection(ref: ref),
+          // P14: Card-based section grouping for premium look
+          // ── Appearance ────────────────────────────────────────────
+          _SettingsCard(header: 'Appearance', children: [
+            _AppearanceSection(ref: ref),
+          ]),
 
-          // ── Download Settings ───────────────────────────────────────
-          const _SectionHeader('Downloads'),
-          _SettingTile(
-            icon: Icons.high_quality_rounded,
-            title: 'Default Quality',
-            subtitle: 'Preferred quality for new downloads',
-            trailing: _QualityDropdown(
-              value: _downloadQuality,
-              onChanged: (v) { setState(() => _downloadQuality = v!); _save(); },
-            ),
-          ),
-          _SettingTile(
-            icon: Icons.wifi_rounded,
-            title: 'Wi-Fi Only',
-            subtitle: 'Only download when connected to Wi-Fi',
-            trailing: Switch(
-              value: _wifiOnly,
-              onChanged: (v) { setState(() => _wifiOnly = v); _save(); },
-            ),
-          ),
-          _SettingTile(
-            icon: Icons.tune_rounded,
-            title: 'Concurrent Downloads',
-            subtitle: 'Max downloads at once ($_maxConcurrent)',
-            trailing: Row(mainAxisSize: MainAxisSize.min, children: [
-              IconButton(
-                icon: const Icon(Icons.remove_circle_outline),
-                onPressed: _maxConcurrent > 1
-                    ? () { setState(() => _maxConcurrent--); _save(); }
-                    : null,
-              ),
-              Text('$_maxConcurrent',
-                  style: Theme.of(context).textTheme.labelLarge),
-              IconButton(
-                icon: const Icon(Icons.add_circle_outline),
-                onPressed: _maxConcurrent < 5
-                    ? () { setState(() => _maxConcurrent++); _save(); }
-                    : null,
-              ),
-            ]),
-          ),
-          _SettingTile(
-            icon: Icons.auto_delete_rounded,
-            title: 'Auto-delete after watching',
-            subtitle: 'Remove files after playing them once',
-            trailing: Switch(
-              value: _autoDelete,
-              onChanged: (v) { setState(() => _autoDelete = v); _save(); },
-            ),
-          ),
-
-
-          // ── Telegram Account ───────────────────────────────────────
-          const _SectionHeader('Telegram'),
-          if (telegram.isLoggedIn)
+          // ── Downloads ─────────────────────────────────────────────
+          _SettingsCard(header: 'Downloads', children: [
             _SettingTile(
-              icon: Icons.check_circle_rounded,
-              title: telegram.phone ?? 'Connected',
-              subtitle: 'Logged in — CDN downloads ready',
-              trailing: TextButton(
-                onPressed: () => telegram.logout(),
-                child: Text('Logout',
-                    style: TextStyle(color: cs.error)),
+              icon: Icons.high_quality_rounded,
+              title: 'Default Quality',
+              subtitle: 'Preferred quality for new downloads',
+              trailing: _QualityDropdown(
+                value: _downloadQuality,
+                onChanged: (v) { setState(() => _downloadQuality = v!); _save(); },
               ),
-            )
-          else
+            ),
             _SettingTile(
-              icon: Icons.telegram,
-              title: 'Connect Telegram',
-              subtitle: _getTelegramSubtitle(telegram.authState),
-              onTap: () => _showTelegramLogin(context, telegram),
-              trailing: Icon(Icons.chevron_right_rounded, color: cs.outline),
+              icon: Icons.wifi_rounded,
+              title: 'Wi-Fi Only',
+              subtitle: 'Only download when connected to Wi-Fi',
+              trailing: Switch(
+                value: _wifiOnly,
+                onChanged: (v) { setState(() => _wifiOnly = v); _save(); },
+              ),
             ),
-          const _SettingTile(
-            icon: Icons.info_outline_rounded,
-            title: 'About Telegram Downloads',
-            subtitle: 'Searches public channels for videos up to 1080p / 5 GB. Direct CDN — always fast.',
-          ),
-          if (telegram.isLoggedIn)
             _SettingTile(
-              icon: Icons.video_library_rounded,
-              title: 'Browse Telegram Channels',
-              subtitle: 'Search movies & shows directly on Telegram',
-              onTap: () => context.push('/telegram-browser'),
-              trailing: Icon(Icons.chevron_right_rounded,
-                  color: Theme.of(context).colorScheme.outline),
+              icon: Icons.tune_rounded,
+              title: 'Concurrent Downloads',
+              subtitle: 'Max downloads at once ($_maxConcurrent)',
+              trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+                IconButton(
+                  icon: const Icon(Icons.remove_circle_outline),
+                  onPressed: _maxConcurrent > 1
+                      ? () { setState(() => _maxConcurrent--); _save(); }
+                      : null,
+                ),
+                Text('$_maxConcurrent',
+                    style: Theme.of(context).textTheme.labelLarge),
+                IconButton(
+                  icon: const Icon(Icons.add_circle_outline),
+                  onPressed: _maxConcurrent < 5
+                      ? () { setState(() => _maxConcurrent++); _save(); }
+                      : null,
+                ),
+              ]),
             ),
+            _SettingTile(
+              icon: Icons.auto_delete_rounded,
+              title: 'Auto-delete after watching',
+              subtitle: 'Remove files after playing them once',
+              trailing: Switch(
+                value: _autoDelete,
+                onChanged: (v) { setState(() => _autoDelete = v); _save(); },
+              ),
+            ),
+          ]),
 
-          // ── Player Settings ─────────────────────────────────────────
-          const _SectionHeader('Player'),
-          _SettingTile(
-            icon: Icons.source_rounded,
-            title: 'Remember Last Source',
-            subtitle: 'Continue with the last working provider',
-            trailing: Switch(
-              value: _rememberProvider,
-              onChanged: (v) { setState(() => _rememberProvider = v); _save(); },
+          // ── Telegram ──────────────────────────────────────────────
+          _SettingsCard(header: 'Telegram', children: [
+            if (telegram.isLoggedIn)
+              _SettingTile(
+                icon: Icons.check_circle_rounded,
+                title: telegram.phone ?? 'Connected',
+                subtitle: 'Logged in — CDN downloads ready',
+                trailing: TextButton(
+                  onPressed: () => telegram.logout(),
+                  child: Text('Logout', style: TextStyle(color: cs.error)),
+                ),
+              )
+            else
+              _SettingTile(
+                icon: Icons.telegram,
+                title: 'Connect Telegram',
+                subtitle: _getTelegramSubtitle(telegram.authState),
+                onTap: () => _showTelegramLogin(context, telegram),
+                trailing: Icon(Icons.chevron_right_rounded, color: cs.outline),
+              ),
+            const _SettingTile(
+              icon: Icons.info_outline_rounded,
+              title: 'About Telegram Downloads',
+              subtitle: 'Searches public channels for videos up to 1080p / 5 GB. Direct CDN — always fast.',
             ),
-          ),
-          _SettingTile(
-            icon: Icons.play_circle_rounded,
-            title: 'Auto-play Next Episode',
-            subtitle: 'Automatically start next episode in series',
-            trailing: Switch(
-              value: _autoPlay,
-              onChanged: (v) { setState(() => _autoPlay = v); _save(); },
-            ),
-          ),
+            if (telegram.isLoggedIn)
+              _SettingTile(
+                icon: Icons.video_library_rounded,
+                title: 'Browse Telegram Channels',
+                subtitle: 'Search movies & shows directly on Telegram',
+                onTap: () => context.push('/telegram-browser'),
+                trailing: Icon(Icons.chevron_right_rounded,
+                    color: Theme.of(context).colorScheme.outline),
+              ),
+          ]),
 
-          // ── App Settings ────────────────────────────────────────────
-          const _SectionHeader('App'),
-          _SettingTile(
-            icon: Icons.history_rounded,
-            title: 'Save Watch History',
-            subtitle: 'Track what you\'ve watched',
-            trailing: Switch(
-              value: _saveHistory,
-              onChanged: (v) { setState(() => _saveHistory = v); _save(); },
+          // ── Player ────────────────────────────────────────────────
+          _SettingsCard(header: 'Player', children: [
+            _SettingTile(
+              icon: Icons.source_rounded,
+              title: 'Remember Last Source',
+              subtitle: 'Continue with the last working provider',
+              trailing: Switch(
+                value: _rememberProvider,
+                onChanged: (v) { setState(() => _rememberProvider = v); _save(); },
+              ),
             ),
-          ),
-          _SettingTile(
-            icon: Icons.delete_sweep_rounded,
-            title: 'Clear Watch History',
-            subtitle: 'Remove all viewing history',
-            onTap: () => _confirmClearHistory(context),
-          ),
-          _SettingTile(
-            icon: Icons.storage_rounded,
-            title: 'Clear Cache',
-            subtitle: 'Free up space used by thumbnails',
-            onTap: () => _clearCache(context),
-          ),
+            _SettingTile(
+              icon: Icons.play_circle_rounded,
+              title: 'Auto-play Next Episode',
+              subtitle: 'Automatically start next episode in series',
+              trailing: Switch(
+                value: _autoPlay,
+                onChanged: (v) { setState(() => _autoPlay = v); _save(); },
+              ),
+            ),
+          ]),
 
-          // ── About ───────────────────────────────────────────────────
-          const _SectionHeader('About'),
-          _SettingTile(
-            icon: Icons.system_update_rounded,
-            title: 'Check for Updates',
-            subtitle: _version.isNotEmpty ? 'Current: $_version' : 'v2.0.0',
-            onTap: () async {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('Checking for updates...')),
-              );
-              final release = await ref.read(otaUpdateProvider).checkForUpdate();
-              if (!context.mounted) return;
-              ScaffoldMessenger.of(context).hideCurrentSnackBar();
-              
-              if (release != null) {
-                UpdateDialog.show(context, release);
-              } else {
+          // ── App ───────────────────────────────────────────────────
+          _SettingsCard(header: 'App', children: [
+            _SettingTile(
+              icon: Icons.history_rounded,
+              title: 'Save Watch History',
+              subtitle: 'Track what you\'ve watched',
+              trailing: Switch(
+                value: _saveHistory,
+                onChanged: (v) { setState(() => _saveHistory = v); _save(); },
+              ),
+            ),
+            _SettingTile(
+              icon: Icons.delete_sweep_rounded,
+              title: 'Clear Watch History',
+              subtitle: 'Remove all viewing history',
+              onTap: () => _confirmClearHistory(context),
+            ),
+            _SettingTile(
+              icon: Icons.storage_rounded,
+              title: 'Clear Cache',
+              subtitle: 'Free up space used by thumbnails',
+              onTap: () => _clearCache(context),
+            ),
+          ]),
+
+          // ── About ─────────────────────────────────────────────────
+          _SettingsCard(header: 'About', children: [
+            _SettingTile(
+              icon: Icons.system_update_rounded,
+              title: 'Check for Updates',
+              subtitle: _version.isNotEmpty ? 'Current: $_version' : 'v3.0.0',
+              onTap: () async {
                 ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('You are on the latest version.')),
+                  const SnackBar(content: Text('Checking for updates...')),
                 );
-              }
-            },
-          ),
-          const _SettingTile(
-            icon: Icons.bolt_rounded,
-            title: 'Powered by',
-            subtitle: 'TDLib · media_kit · Atmos Engine',
-          ),
+                final release = await ref.read(otaUpdateProvider).checkForUpdate();
+                if (!context.mounted) return;
+                ScaffoldMessenger.of(context).hideCurrentSnackBar();
+                if (release != null) {
+                  UpdateDialog.show(context, release);
+                } else {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('You are on the latest version.')),
+                  );
+                }
+              },
+            ),
+            const _SettingTile(
+              icon: Icons.bolt_rounded,
+              title: 'Powered by',
+              subtitle: 'TDLib · media_kit · Atmos Engine',
+            ),
+          ]),
 
           const SizedBox(height: AppSpacing.xl),
         ].animate(interval: 20.ms).fadeIn(duration: 400.ms, curve: AppMotion.emphasizedDecelerate).slideY(begin: 0.1, end: 0, duration: 400.ms, curve: AppMotion.emphasizedCurve),
       ),
     );
   }
+
 
   String _getTelegramSubtitle(TelegramAuthState state) => switch (state) {
     TelegramAuthState.waitingForPhone => 'Tap to enter phone number',
@@ -636,26 +641,42 @@ class _TelegramLoginSheetState extends State<_TelegramLoginSheet> {
 
 // ─── Reusable Widgets ─────────────────────────────────────────────────────────
 
-class _SectionHeader extends StatelessWidget {
-  final String title;
-  const _SectionHeader(this.title);
+// P14: Rounded card that groups settings tiles with an inline section header
+class _SettingsCard extends StatelessWidget {
+  final String header;
+  final List<Widget> children;
+  const _SettingsCard({required this.header, required this.children});
 
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     return Padding(
-      padding: const EdgeInsets.fromLTRB(
-        AppSpacing.lg, AppSpacing.lg, AppSpacing.lg, AppSpacing.xs + AppSpacing.xs),
-      child: Text(
-        title.toUpperCase(),
-        style: Theme.of(context).textTheme.labelSmall?.copyWith(
-          color: cs.primary,
-          letterSpacing: 1.2,
-        ),
+      padding: const EdgeInsets.only(bottom: AppSpacing.md),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(left: AppSpacing.xs, bottom: AppSpacing.xs),
+            child: Text(
+              header.toUpperCase(),
+              style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                color: cs.primary, letterSpacing: 1.2),
+            ),
+          ),
+          Card(
+            margin: EdgeInsets.zero,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            color: cs.surfaceContainer,
+            elevation: 0,
+            child: Column(children: children),
+          ),
+        ],
       ),
     );
   }
 }
+
+
 
 class _SettingTile extends StatelessWidget {
   final IconData icon;

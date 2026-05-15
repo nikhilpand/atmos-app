@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
@@ -17,6 +18,11 @@ class SearchScreen extends ConsumerStatefulWidget {
 class _SearchScreenState extends ConsumerState<SearchScreen> {
   final TextEditingController _controller = TextEditingController();
   final FocusNode _searchFocus = FocusNode();
+  // B7: Timer-based debouncer — cancels the previous timer on each keystroke
+  // preventing multiple concurrent API requests during fast typing.
+  Timer? _debounce;
+  // P13: Track active type filter
+  MediaType? _filterType; // null = All
 
   @override
   void initState() {
@@ -28,6 +34,7 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
 
   @override
   void dispose() {
+    _debounce?.cancel();
     _controller.dispose();
     _searchFocus.dispose();
     super.dispose();
@@ -67,8 +74,10 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
           controller: _controller,
           focusNode: _searchFocus,
           onChanged: (v) {
-            Future.delayed(const Duration(milliseconds: 400), () {
-              if (_controller.text == v && mounted) {
+            // B7: Cancel any pending debounce and restart — no leaked futures
+            _debounce?.cancel();
+            _debounce = Timer(const Duration(milliseconds: 380), () {
+              if (mounted) {
                 ref.read(searchQueryProvider.notifier).state = v;
               }
             });
@@ -107,44 +116,119 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
                   style: TextStyle(color: cs.error),
                 ),
               ),
-              data: (items) {
-                if (items.isEmpty) {
-                  return Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        Icon(Icons.search_off_rounded,
-                            size: 64, color: cs.onSurfaceVariant),
-                        const SizedBox(height: AppSpacing.md),
-                        Text(
-                          'No results for "$query"',
-                          style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                            color: cs.onSurfaceVariant,
+              data: (allItems) {
+                // P13: Apply type filter
+                final items = _filterType == null
+                    ? allItems
+                    : allItems.where((m) => m.mediaType == _filterType).toList();
+
+                return Column(
+                  children: [
+                    // P13: Type filter chips
+                    Padding(
+                      padding: EdgeInsets.symmetric(horizontal: hPad, vertical: 8),
+                      child: SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: Row(
+                          children: [
+                            _FilterChip(
+                              label: 'All (${allItems.length})',
+                              selected: _filterType == null,
+                              onSelected: (_) => setState(() => _filterType = null),
+                            ),
+                            const SizedBox(width: 8),
+                            _FilterChip(
+                              label: 'Movies (${allItems.where((m) => m.mediaType == MediaType.movie).length})',
+                              selected: _filterType == MediaType.movie,
+                              onSelected: (_) => setState(() => _filterType = MediaType.movie),
+                            ),
+                            const SizedBox(width: 8),
+                            _FilterChip(
+                              label: 'TV Shows (${allItems.where((m) => m.mediaType == MediaType.tv).length})',
+                              selected: _filterType == MediaType.tv,
+                              onSelected: (_) => setState(() => _filterType = MediaType.tv),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    if (items.isEmpty)
+                      Expanded(
+                        child: Center(
+                          child: Column(
+                            mainAxisAlignment: MainAxisAlignment.center,
+                            children: [
+                              Icon(Icons.search_off_rounded,
+                                  size: 64, color: cs.onSurfaceVariant),
+                              const SizedBox(height: AppSpacing.md),
+                              Text(
+                                _filterType == null
+                                    ? 'No results for "$query"'
+                                    : 'No ${_filterType == MediaType.movie ? 'movies' : 'TV shows'} for "$query"',
+                                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                                  color: cs.onSurfaceVariant,
+                                ),
+                              ),
+                            ],
                           ),
                         ),
-                      ],
-                    ),
-                  );
-                }
-                return GridView.builder(
-                  padding: EdgeInsets.all(hPad),
-                  gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
-                    maxCrossAxisExtent: context.isExpanded ? 220.0 : 145.0,
-                    childAspectRatio: 2 / 3.1,
-                    crossAxisSpacing: AppSpacing.sm,
-                    mainAxisSpacing: AppSpacing.sm,
-                  ),
-                  itemCount: items.length,
-                  itemBuilder: (context, i) {
-                    return MediaCard(
-                      media: items[i],
-                      autofocus: i == 0,
-                      onTap: () => _navigateToDetails(items[i]),
-                    ).animate().fadeIn(duration: 400.ms, delay: (i * 30).ms, curve: AppMotion.emphasizedDecelerate).scaleXY(begin: 0.9, end: 1, duration: 400.ms, delay: (i * 30).ms, curve: AppMotion.emphasizedCurve);
-                  },
+                      )
+                    else
+                      Expanded(
+                        child: GridView.builder(
+                          padding: EdgeInsets.all(hPad),
+                          gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
+                            maxCrossAxisExtent: context.isExpanded ? 220.0 : 145.0,
+                            childAspectRatio: 2 / 3.1,
+                            crossAxisSpacing: AppSpacing.sm,
+                            mainAxisSpacing: AppSpacing.sm,
+                          ),
+                          itemCount: items.length,
+                          itemBuilder: (context, i) {
+                            return MediaCard(
+                              media: items[i],
+                              autofocus: i == 0,
+                              onTap: () => _navigateToDetails(items[i]),
+                            ).animate().fadeIn(duration: 400.ms, delay: (i * 30).ms, curve: AppMotion.emphasizedDecelerate).scaleXY(begin: 0.9, end: 1, duration: 400.ms, delay: (i * 30).ms, curve: AppMotion.emphasizedCurve);
+                          },
+                        ),
+                      ),
+                  ],
                 );
               },
             ),
+    );
+  }
+}
+
+// ─── Filter Chip ───────────────────────────────────────────────────────────────
+
+class _FilterChip extends StatelessWidget {
+  final String label;
+  final bool selected;
+  final ValueChanged<bool> onSelected;
+  const _FilterChip({required this.label, required this.selected, required this.onSelected});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return FilterChip(
+      label: Text(label),
+      selected: selected,
+      onSelected: onSelected,
+      selectedColor: cs.secondaryContainer,
+      labelStyle: TextStyle(
+        color: selected ? cs.onSecondaryContainer : cs.onSurface,
+        fontWeight: selected ? FontWeight.w600 : FontWeight.w400,
+        fontSize: 13,
+      ),
+      side: BorderSide(
+        color: selected ? cs.secondary : cs.outlineVariant,
+        width: 1,
+      ),
+      checkmarkColor: cs.onSecondaryContainer,
+      showCheckmark: true,
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
     );
   }
 }

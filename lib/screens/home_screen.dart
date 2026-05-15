@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cached_network_image/cached_network_image.dart';
@@ -17,16 +18,47 @@ class HomeScreen extends ConsumerStatefulWidget {
   ConsumerState<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends ConsumerState<HomeScreen> {
+class _HomeScreenState extends ConsumerState<HomeScreen>
+    with WidgetsBindingObserver { // B6: observe app lifecycle to refresh on resume
   int _heroIndex = 0;
   final ScrollController _scroll = ScrollController();
+  // U8: Auto-rotation timer for hero banner
+  Timer? _heroTimer;
+  List<TmdbMedia> _heroItems = [];
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this); // B6
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _checkForUpdates();
     });
+  }
+
+  // B6: Called when app resumes from background or another screen pops
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      ref.read(continueWatchingProvider.notifier).refresh();
+    }
+  }
+
+  // U8: Start auto-rotation with dynamic intervals (like premium apps)
+  void _startHeroTimer(List<TmdbMedia> items) {
+    _heroTimer?.cancel();
+    if (items.length < 2) return;
+    // Dynamic: 6s first, then 5s, then 7s to feel organic
+    final intervals = [6, 5, 7, 6];
+    int tick = 0;
+    void schedule() {
+      _heroTimer = Timer(Duration(seconds: intervals[tick % intervals.length]), () {
+        if (!mounted) return;
+        setState(() => _heroIndex = (_heroIndex + 1) % items.length);
+        tick++;
+        schedule();
+      });
+    }
+    schedule();
   }
 
   Future<void> _checkForUpdates() async {
@@ -37,7 +69,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   @override
-  void dispose() { _scroll.dispose(); super.dispose(); }
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this); // B6
+    _heroTimer?.cancel(); // U8
+    _scroll.dispose();
+    super.dispose();
+  }
 
   void _go(TmdbMedia m) =>
       context.push('/details/${m.mediaType == MediaType.movie ? 'movie' : 'tv'}/${m.id}');
@@ -71,7 +108,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           SliverAppBar(
             pinned: true,
             expandedHeight: 0,
-            backgroundColor: cs.surface.withValues(alpha: 0.95),
+            // P6: Transparent so hero image bleeds to the top edge
+            backgroundColor: Colors.transparent,
+            surfaceTintColor: Colors.transparent,
             flexibleSpace: Container(),
             title: Row(
               children: [
@@ -96,11 +135,27 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             child: trending.when(
               data: (items) {
                 if (items.isEmpty) return const SizedBox.shrink();
+                // U8: Start timer once items load
+                if (_heroItems.isEmpty || _heroItems != items) {
+                  _heroItems = items;
+                  WidgetsBinding.instance.addPostFrameCallback(
+                      (_) => _startHeroTimer(items));
+                }
                 final hero = items[_heroIndex % items.length];
-                return _HeroBanner(
-                  media: hero,
-                  onPlay: () => _go(hero),
-                  onChangeHero: () => setState(() => _heroIndex = (_heroIndex + 1) % items.length),
+                return AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 700),
+                  transitionBuilder: (child, anim) =>
+                      FadeTransition(opacity: anim, child: child),
+                  child: _HeroBanner(
+                    key: ValueKey(_heroIndex),
+                    media: hero,
+                    onPlay: () => _go(hero),
+                    onChangeHero: () {
+                      _heroTimer?.cancel();
+                      setState(() => _heroIndex = (_heroIndex + 1) % items.length);
+                      _startHeroTimer(items);
+                    },
+                  ),
                 );
               },
               loading: () => const _HeroSkeleton(),
@@ -400,7 +455,7 @@ class _HeroBanner extends StatelessWidget {
   final TmdbMedia media;
   final VoidCallback onPlay;
   final VoidCallback onChangeHero;
-  const _HeroBanner({required this.media, required this.onPlay, required this.onChangeHero});
+  const _HeroBanner({super.key, required this.media, required this.onPlay, required this.onChangeHero});
 
   @override
   Widget build(BuildContext context) {
@@ -593,13 +648,52 @@ class _ContinueWatchingRow extends StatelessWidget {
 
 // ─── Skeletons & Errors ───────────────────────────────────────────────────────
 
-class _HeroSkeleton extends StatelessWidget {
+// P7: Shimmer-animated hero skeleton instead of plain ColoredBox
+class _HeroSkeleton extends StatefulWidget {
   const _HeroSkeleton();
   @override
-  Widget build(BuildContext context) => Container(
-    height: context.isExpanded ? 600 : 500,
-    color: Theme.of(context).colorScheme.surfaceContainer,
-  );
+  State<_HeroSkeleton> createState() => _HeroSkeletonState();
+}
+
+class _HeroSkeletonState extends State<_HeroSkeleton>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+  late final Animation<double> _shimmer;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(vsync: this, duration: const Duration(milliseconds: 1200))
+      ..repeat(reverse: true);
+    _shimmer = Tween<double>(begin: -1.5, end: 1.5).animate(
+        CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut));
+  }
+
+  @override
+  void dispose() { _ctrl.dispose(); super.dispose(); }
+
+  @override
+  Widget build(BuildContext context) {
+    final h = context.isExpanded ? 600.0 : 500.0;
+    final cs = Theme.of(context).colorScheme;
+    return AnimatedBuilder(
+      animation: _shimmer,
+      builder: (_, __) => Container(
+        height: h,
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment(_shimmer.value - 1, 0),
+            end: Alignment(_shimmer.value + 1, 0),
+            colors: [
+              cs.surfaceContainer,
+              cs.surfaceContainerHighest,
+              cs.surfaceContainer,
+            ],
+          ),
+        ),
+      ),
+    );
+  }
 }
 
 class _RowSkeleton extends StatelessWidget {

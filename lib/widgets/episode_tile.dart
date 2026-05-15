@@ -145,8 +145,8 @@ class _EpisodeTileState extends State<EpisodeTile> {
                   ),
                 ],
               ),
-              // Progress bar
-              if (progress > 0.02 && !widget.watchHistory!.isFinished) ...[
+              // Progress bar — only show if there is history, progress > 2%, and not finished
+              if (progress > 0.02 && widget.watchHistory != null && !widget.watchHistory!.isFinished) ...[
                 const SizedBox(height: 8),
                 ClipRRect(
                   borderRadius: BorderRadius.circular(4),

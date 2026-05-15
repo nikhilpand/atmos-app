@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:screen_brightness/screen_brightness.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:volume_controller/volume_controller.dart';
 import '../services/stream_extractor_service.dart';
 import '../providers/providers.dart';
@@ -70,10 +71,20 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
   // Position listener — MUST be stored to prevent leak on quality switch
   StreamSubscription<Duration>? _positionSub;
 
+  // B1: Local episode override instead of mutating the immutable widget.args map.
+  // Previously _advanceEpisode() mutated widget.args['episode'] directly which
+  // corrupted the caller's state across the entire widget tree.
+  int? _episodeOverride;
+  // U7: Countdown state for auto-advance overlay
+  int _countdownSeconds = 0;
+  Timer? _countdownTimer;
+  bool _showingCountdown = false;
+
   String get _title => widget.args['title'] as String? ?? 'Untitled';
   String get _type => widget.args['type'] as String? ?? 'movie';
   int get _season => widget.args['season'] as int? ?? 1;
-  int get _episode => widget.args['episode'] as int? ?? 1;
+  // B1: Use local override if set, otherwise fall back to args
+  int get _episode => _episodeOverride ?? (widget.args['episode'] as int? ?? 1);
   String get _imdbId => widget.args['imdbId'] as String? ?? '';
   String get _tmdbId {
     final tmdb = widget.args['tmdbId'];
@@ -99,7 +110,14 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
       if (mounted) setState(() => _isBuffering = buffering);
     });
 
-    _startExtraction();
+    // U11: Local file fast-path — bypass all stream extraction
+    final isLocal = widget.args['isLocal'] == true;
+    final localPath = widget.args['localPath'] as String?;
+    if (isLocal && localPath != null && localPath.isNotEmpty) {
+      _playLocalFile(localPath);
+    } else {
+      _startExtraction();
+    }
     _scheduleHideControls();
   }
 
@@ -108,6 +126,7 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
     _controlsTimer?.cancel();
     _seekAnimTimer?.cancel();
     _gestureHideTimer?.cancel();
+    _countdownTimer?.cancel(); // U7
     _positionSub?.cancel();
     _player.dispose();
     SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
@@ -163,6 +182,19 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
     });
   }
 
+  // U11: Play a locally downloaded file directly via media_kit (no extraction)
+  Future<void> _playLocalFile(String path) async {
+    debugPrint('[NativePlayer] Playing local file: $path');
+    setState(() {
+      _state = _ExState.playing;
+      _statusMsg = 'Playing from storage';
+      _providerBadge = '💾 Local';
+    });
+    await _player.open(Media(Uri.file(path).toString()));
+    await _positionSub?.cancel();
+    _positionSub = _player.stream.position.listen(_onPositionChanged);
+  }
+
   void _playStream(ExtractedStream stream, {Duration? resumeFrom}) async {
     setState(() {
       _state = _ExState.playing;
@@ -214,28 +246,42 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
   void _showPlayerSettings() {
     showModalBottomSheet(
       context: context,
-      backgroundColor: const Color(0xFF1A1A2E),
+      // P1: Use BackdropFilter frosted glass instead of hardcoded dark color
+      backgroundColor: Colors.transparent,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
-      builder: (_) => _PlayerSettingsSheet(
-        player: _player,
-        stream: _currentStream,
-        activeQuality: _activeQuality,
-        activeSubtitle: _activeSubtitle,
-        onQualitySelect: (q) {
-          _switchQuality(q);
-          Navigator.pop(context);
-        },
-        onSubtitleSelect: (sub) {
-          _toggleSubtitle(sub);
-          Navigator.pop(context);
-        },
-        onAudioSelect: (track) {
-          _player.setAudioTrack(track);
-          setState(() {}); // Rebuild to reflect active track
-          Navigator.pop(context);
-        },
+      builder: (_) => ClipRRect(
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+          child: Container(
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.75),
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+              border: Border.all(color: Colors.white10),
+            ),
+            child: _PlayerSettingsSheet(
+              player: _player,
+              stream: _currentStream,
+              activeQuality: _activeQuality,
+              activeSubtitle: _activeSubtitle,
+              onQualitySelect: (q) {
+                _switchQuality(q);
+                Navigator.pop(context);
+              },
+              onSubtitleSelect: (sub) {
+                _toggleSubtitle(sub);
+                Navigator.pop(context);
+              },
+              onAudioSelect: (track) {
+                _player.setAudioTrack(track);
+                setState(() {}); // Rebuild to reflect active track
+                Navigator.pop(context);
+              },
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -243,7 +289,15 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
   // ── Quality control ──
 
   void _switchQuality(QualityOption quality) {
-    if (_currentStream == null || quality.url == _currentStream!.url) return;
+    // B2: Compare quality.url against quality.url (not the current stream URL),
+    // and update _currentStream after switch so the 2nd switch works correctly.
+    if (_currentStream == null) return;
+    final currentQualityUrl = _currentStream!.qualities
+        .firstWhere((q) => q.quality == _activeQuality,
+            orElse: () => QualityOption(quality: _activeQuality, url: _currentStream!.url))
+        .url;
+    if (quality.url == currentQualityUrl) return;
+
     final currentPos = _player.state.position;
     debugPrint('[Player] Switching to ${quality.quality} at ${currentPos.inSeconds}s');
 
@@ -286,17 +340,46 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
       episode: _type == 'tv' ? _episode : null,
     );
 
-    // Auto-advance at 95%
+    // Auto-advance at 95% — gated on autoplay preference
     if (_type == 'tv' && !_hasAdvanced && (pos.inSeconds / dur.inSeconds) > 0.95) {
       _hasAdvanced = true;
-      _advanceEpisode();
+      _maybeAdvanceEpisode();
     }
+  }
+
+  // U2: Check autoplay preference before advancing
+  Future<void> _maybeAdvanceEpisode() async {
+    final prefs = await SharedPreferences.getInstance();
+    final autoplay = prefs.getBool('player_autoplay') ?? true;
+    if (!autoplay || !mounted) return;
+    _startCountdown();
+  }
+
+  // U7: 5-second countdown overlay with cancel option before auto-advancing
+  void _startCountdown() {
+    if (!mounted) return;
+    setState(() { _showingCountdown = true; _countdownSeconds = 5; });
+    _countdownTimer?.cancel();
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (t) {
+      if (!mounted) { t.cancel(); return; }
+      setState(() => _countdownSeconds--);
+      if (_countdownSeconds <= 0) {
+        t.cancel();
+        setState(() => _showingCountdown = false);
+        _advanceEpisode();
+      }
+    });
+  }
+
+  void _cancelCountdown() {
+    _countdownTimer?.cancel();
+    setState(() { _showingCountdown = false; _countdownSeconds = 0; });
   }
 
   void _advanceEpisode() {
     if (!mounted) return;
-    widget.args['episode'] = _episode + 1;
-    widget.args['episodeName'] = 'Episode ${_episode + 1}';
+    // B1: Use local state instead of mutating widget.args
+    setState(() => _episodeOverride = _episode + 1);
     _startExtraction();
   }
 
@@ -402,7 +485,8 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
   }
 
   void _onLongPressEnd() {
-    if (!_longPressing) return;
+    // B3: Guard — only reset rate if we actually started a long press
+    if (!mounted || !_longPressing) return;
     setState(() => _longPressing = false);
     _player.setRate(_playbackSpeed);
   }
@@ -676,9 +760,23 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
                         onLock: _toggleLock,
                         onCycleSpeed: _cycleSpeed,
                         onToggleFit: _toggleFit,
-                        onNextEpisode: _type == 'tv' ? _advanceEpisode : null,
+                        onNextEpisode: _type == 'tv' ? () {
+                          _cancelCountdown();
+                          _advanceEpisode();
+                        } : null,
                         onSettings: _showPlayerSettings,
                       ),
+                    ),
+                  ),
+
+                // U7: Auto-advance countdown overlay — Netflix-style
+                if (_showingCountdown)
+                  Positioned(
+                    bottom: 80, right: 24,
+                    child: _NextEpisodeCountdown(
+                      secondsLeft: _countdownSeconds,
+                      onCancel: _cancelCountdown,
+                      onPlayNow: () { _cancelCountdown(); _advanceEpisode(); },
                     ),
                   ),
               ],
@@ -753,28 +851,8 @@ class _StatusOverlay extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               if (state == _ExState.extracting) ...[
-                // Pulsing extraction indicator
-                TweenAnimationBuilder<double>(
-                  tween: Tween(begin: 0.6, end: 1.0),
-                  duration: const Duration(milliseconds: 800),
-                  builder: (_, v, child) => Opacity(opacity: v, child: child),
-                  onEnd: () {},
-                  child: Container(
-                    width: 64,
-                    height: 64,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      border: Border.all(color: Colors.white24, width: 2),
-                    ),
-                    child: const Padding(
-                      padding: EdgeInsets.all(12),
-                      child: CircularProgressIndicator(
-                        color: Colors.white,
-                        strokeWidth: 2,
-                      ),
-                    ),
-                  ),
-                ),
+                // P5: Properly looping pulse — old TweenAnimationBuilder fired once and stopped
+                const _PulsingSpinner(),
                 const SizedBox(height: 24),
                 Text(
                   message,
@@ -815,7 +893,138 @@ class _StatusOverlay extends StatelessWidget {
   }
 }
 
-// ─── Controls Overlay ─────────────────────────────────────────────────────────
+// P5: Properly looping pulsing spinner using AnimationController.repeat()
+class _PulsingSpinner extends StatefulWidget {
+  const _PulsingSpinner();
+  @override
+  State<_PulsingSpinner> createState() => _PulsingSpinnerState();
+}
+
+class _PulsingSpinnerState extends State<_PulsingSpinner>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _ctrl;
+  late final Animation<double> _opacity;
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    )..repeat(reverse: true);
+    _opacity = Tween<double>(begin: 0.4, end: 1.0).animate(
+      CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut),
+    );
+  }
+
+  @override
+  void dispose() { _ctrl.dispose(); super.dispose(); }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: _opacity,
+      builder: (_, child) => Opacity(opacity: _opacity.value, child: child),
+      child: Container(
+        width: 72, height: 72,
+        decoration: BoxDecoration(
+          shape: BoxShape.circle,
+          border: Border.all(color: Colors.white24, width: 2),
+        ),
+        child: const Padding(
+          padding: EdgeInsets.all(14),
+          child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.5),
+        ),
+      ),
+    );
+  }
+}
+
+// \u2500\u2500\u2500 Next Episode Countdown (U7) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+class _NextEpisodeCountdown extends StatelessWidget {
+  final int secondsLeft;
+  final VoidCallback onCancel;
+  final VoidCallback onPlayNow;
+  const _NextEpisodeCountdown({
+    required this.secondsLeft,
+    required this.onCancel,
+    required this.onPlayNow,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(16),
+      child: BackdropFilter(
+        filter: ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 280),
+          padding: const EdgeInsets.all(16),
+          decoration: BoxDecoration(
+            color: Colors.black.withValues(alpha: 0.72),
+            borderRadius: BorderRadius.circular(16),
+            border: Border.all(color: Colors.white12),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('Next Episode',
+                style: TextStyle(color: Colors.white54, fontSize: 12, fontWeight: FontWeight.w500)),
+              const SizedBox(height: 4),
+              Text(
+                'Playing in $secondsLeft second${secondsLeft == 1 ? '' : 's'}...',
+                style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 10),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(3),
+                child: LinearProgressIndicator(
+                  value: secondsLeft / 5.0,
+                  backgroundColor: Colors.white12,
+                  valueColor: const AlwaysStoppedAnimation<Color>(Colors.deepPurpleAccent),
+                  minHeight: 3,
+                ),
+              ),
+              const SizedBox(height: 12),
+              Row(children: [
+                Expanded(
+                  child: GestureDetector(
+                    onTap: onPlayNow,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(vertical: 9),
+                      decoration: BoxDecoration(color: Colors.white, borderRadius: BorderRadius.circular(8)),
+                      child: const Center(child: Text('Play Now',
+                        style: TextStyle(color: Colors.black, fontWeight: FontWeight.w700, fontSize: 13))),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 8),
+                GestureDetector(
+                  onTap: onCancel,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 9),
+                    decoration: BoxDecoration(
+                      color: Colors.white12,
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.white24),
+                    ),
+                    child: const Text('Cancel', style: TextStyle(color: Colors.white70, fontSize: 13)),
+                  ),
+                ),
+              ]),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+// \u2500\u2500\u2500 Controls Overlay \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+
+
 
 class _ControlsOverlay extends StatelessWidget {
   final String title;

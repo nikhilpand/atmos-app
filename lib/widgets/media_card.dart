@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import '../models/media_model.dart';
@@ -40,7 +41,10 @@ class _MediaCardState extends State<MediaCard> {
       autofocus: widget.autofocus,
       onFocusChange: (v) => setState(() => _isFocused = v),
       child: GestureDetector(
-        onTap: widget.onTap,
+        onTap: () {
+          HapticFeedback.selectionClick(); // P16: haptic on every card tap
+          widget.onTap();
+        },
         child: AnimatedContainer(
           duration: const Duration(milliseconds: 180),
           curve: Curves.easeOut,
@@ -184,7 +188,7 @@ class _MediaCardState extends State<MediaCard> {
           ),
         ),
       ),
-    ).animate(target: _isFocused ? 1 : 0);
+    );
   }
 }
 

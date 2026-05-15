@@ -242,23 +242,37 @@ GoRouter _buildRouter(bool onboardingDone, RecommendationService recService) {
 
 // ─── App Root ─────────────────────────────────────────────────────────────────
 
-class AtmosApp extends ConsumerWidget {
+class AtmosApp extends ConsumerStatefulWidget {
   final bool onboardingDone;
   const AtmosApp({super.key, required this.onboardingDone});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<AtmosApp> createState() => _AtmosAppState();
+}
+
+class _AtmosAppState extends ConsumerState<AtmosApp> {
+  // B8: Router is created ONCE here, not on every build() call.
+  // Rebuilding on theme seed change previously reset navigation state.
+  late final GoRouter _router;
+
+  @override
+  void initState() {
+    super.initState();
+    final recService = ref.read(recommendationServiceProvider);
+    _router = _buildRouter(widget.onboardingDone, recService);
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final seed = ref.watch(seedColorProvider);
     final theme = AtmosTheme.build(seed);
-    final recService = ref.read(recommendationServiceProvider);
-    final router = _buildRouter(onboardingDone, recService);
 
     return MaterialApp.router(
       title: 'Atmos',
       debugShowCheckedModeBanner: false,
       theme: theme,
       scrollBehavior: const MaterialScrollBehavior(),
-      routerConfig: router,
+      routerConfig: _router,
     );
   }
 }

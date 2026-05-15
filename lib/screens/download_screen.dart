@@ -3,7 +3,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import 'package:go_router/go_router.dart';
-import 'package:url_launcher/url_launcher.dart';
+
 import '../models/download_model.dart';
 import '../providers/providers.dart';
 import '../theme/app_theme.dart';
@@ -571,23 +571,37 @@ class _PlayButton extends StatelessWidget {
       child: SizedBox(
         width: double.infinity,
         child: FilledButton.icon(
-          onPressed: () async {
-            if (task.filePath != null) {
-              final uri = Uri.file(task.filePath!);
-              if (!await launchUrl(uri)) {
-                if (context.mounted) {
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('Cannot open file')),
-                  );
-                }
-              }
-            }
-          },
+          // U11: Play in-app via native player — bypasses stream extractor for local files
+          onPressed: () => _playLocal(context),
           icon: const Icon(Icons.play_arrow_rounded),
           label: const Text('Play Offline'),
+          style: FilledButton.styleFrom(
+            padding: const EdgeInsets.symmetric(vertical: 12),
+          ),
         ),
       ),
     );
+  }
+
+  void _playLocal(BuildContext context) {
+    final path = task.filePath;
+    if (path == null || !File(path).existsSync()) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('File not found on device')),
+      );
+      return;
+    }
+    // U11: Navigate to native player with localPath — player bypasses extraction
+    context.push('/player', extra: {
+      'title': task.displayTitle,
+      'type': task.mediaType,        // non-nullable String in model
+      'imdbId': task.imdbId,         // non-nullable String in model
+      'tmdbId': task.tmdbId,         // non-nullable int in model
+      'season': task.season ?? 1,
+      'episode': task.episode ?? 1,
+      'localPath': path,
+      'isLocal': true,
+    });
   }
 }
 
