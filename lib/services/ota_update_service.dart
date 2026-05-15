@@ -3,11 +3,10 @@ import 'dart:io';
 import 'package:http/http.dart' as http;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
+
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 
-final otaUpdateProvider = Provider((ref) => OtaUpdateService());
 
 class GithubRelease {
   final String tagName;

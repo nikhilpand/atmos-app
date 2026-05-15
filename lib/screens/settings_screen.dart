@@ -10,7 +10,6 @@ import '../theme/app_theme.dart';
 import '../providers/providers.dart';
 import '../models/download_source.dart';
 import '../services/telegram_service.dart';
-import '../services/ota_update_service.dart';
 import '../widgets/update_dialog.dart';
 
 // ─── Settings Screen ──────────────────────────────────────────────────────────

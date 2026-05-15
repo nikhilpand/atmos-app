@@ -134,6 +134,8 @@ class TmdbDetails extends TmdbMedia {
   final int? numberOfSeasons;
   final int? numberOfEpisodes;
   final List<Cast> cast;
+  final int voteCount;          // P12: for "7.4 (3.2K)" badge
+  final String? trailerKey;     // P11: YouTube key for trailer button
 
   TmdbDetails({
     required super.id,
@@ -153,9 +155,22 @@ class TmdbDetails extends TmdbMedia {
     this.numberOfSeasons,
     this.numberOfEpisodes,
     required this.cast,
+    this.voteCount = 0,
+    this.trailerKey,
   });
 
   factory TmdbDetails.fromJson(Map<String, dynamic> json, MediaType type) {
+    // P11: Extract trailer key from videos appendix
+    String? trailerKey;
+    final videos = json['videos']?['results'] as List?;
+    if (videos != null && videos.isNotEmpty) {
+      final trailer = videos.firstWhere(
+        (v) => v['type'] == 'Trailer' && v['site'] == 'YouTube',
+        orElse: () => videos.first,
+      );
+      trailerKey = trailer['key'] as String?;
+    }
+
     return TmdbDetails(
       id: json['id'],
       title: json['title'] ?? json['name'] ?? 'Unknown',
@@ -182,6 +197,8 @@ class TmdbDetails extends TmdbMedia {
           .take(15)
           .map((c) => Cast.fromJson(c))
           .toList(),
+      voteCount: json['vote_count'] ?? 0,
+      trailerKey: trailerKey,
     );
   }
 

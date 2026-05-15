@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../services/ota_update_service.dart';
-
+import '../providers/providers.dart';
 class UpdateDialog extends ConsumerStatefulWidget {
   final GithubRelease release;
 

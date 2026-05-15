@@ -10,6 +10,7 @@ import '../services/telegram_service.dart';
 import '../services/recommendation_service.dart';
 import '../services/watchlist_service.dart';
 import '../services/subtitle_service.dart';
+import '../services/ota_update_service.dart';
 import '../theme/app_tokens.dart';
 
 // ─── Core Service Providers ───────────────────────────────────────────────────
@@ -44,6 +45,9 @@ final watchlistProvider = ChangeNotifierProvider<WatchlistService>((ref) {
 
 /// OpenSubtitles API client — singleton, no init needed.
 final subtitleServiceProvider = Provider<SubtitleService>((ref) => SubtitleService());
+
+/// GitHub OTA updater — checks for new releases and downloads APKs.
+final otaUpdateProvider = Provider<OtaUpdateService>((ref) => OtaUpdateService());
 
 /// Current download source preference (telegram only).
 final downloadSourceProvider = StateProvider<DownloadSource>(

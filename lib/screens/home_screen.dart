@@ -9,7 +9,6 @@ import '../providers/providers.dart';
 import '../services/tmdb_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/media_card.dart';
-import '../services/ota_update_service.dart';
 import '../widgets/update_dialog.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {

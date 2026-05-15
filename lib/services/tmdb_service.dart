@@ -247,7 +247,7 @@ class TmdbService {
 
   Future<TmdbDetails> getTvDetails(int tmdbId) async {
     final data = await _get('/tv/$tmdbId', {
-      'append_to_response': 'credits,external_ids',
+      'append_to_response': 'credits,external_ids,videos',
     });
     return TmdbDetails.fromJson(data, MediaType.tv);
   }

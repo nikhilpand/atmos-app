@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:go_router/go_router.dart';
+import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter_animate/flutter_animate.dart';
 import '../models/media_model.dart';
 import '../models/download_model.dart';
@@ -84,13 +85,13 @@ class _DetailsContent extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final isTv = context.isExpanded;
+    final isWide = context.isExpanded;
 
     return CustomScrollView(
       slivers: [
         // Sticky back button + backdrop
         SliverAppBar(
-          expandedHeight: isTv ? 500.0 : 400.0,
+          expandedHeight: isWide ? 500.0 : 400.0,
           pinned: true,
           backgroundColor: Theme.of(context).colorScheme.surface,
           leading: Focus(
@@ -144,10 +145,10 @@ class _DetailsContent extends ConsumerWidget {
         SliverToBoxAdapter(
           child: Padding(
             padding: EdgeInsets.symmetric(
-              horizontal: isTv ? 60 : 20,
+              horizontal: isWide ? 60 : 20,
               vertical: 24,
             ),
-            child: isTv
+            child: isWide
                 ? _TvLayout(details: details)
                 : _MobileLayout(details: details),
           ),
@@ -331,14 +332,14 @@ class _MediaInfo extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isTv = context.isExpanded;
+    final isWide = context.isExpanded;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
           details.title,
           style: TextStyle(
-            fontSize: isTv ? 36 : 22,
+            fontSize: isWide ? 36 : 22,
             fontWeight: FontWeight.w800,
             color: Theme.of(context).colorScheme.onSurface,
             height: 1.2,
@@ -352,7 +353,7 @@ class _MediaInfo extends StatelessWidget {
             if (details.voteAverage > 0)
               _Badge(
                 icon: Icons.star_rounded,
-                label: details.voteAverage.toStringAsFixed(1),
+                label: '${details.voteAverage.toStringAsFixed(1)} (${_formatVoteCount(details.voteCount)})',
                 color: Colors.amber.shade400,
               ),
             if (details.year.isNotEmpty) _Badge(label: details.year),
@@ -365,6 +366,11 @@ class _MediaInfo extends StatelessWidget {
         ),
       ],
     );
+  }
+
+  String _formatVoteCount(int count) {
+    if (count >= 1000) return '${(count / 1000).toStringAsFixed(1)}K';
+    return count.toString();
   }
 }
 
@@ -613,6 +619,28 @@ class _PlayButtonState extends ConsumerState<_PlayButton> {
               ),
             ),
           ],
+          if (widget.details.trailerKey != null) ...[
+            const SizedBox(width: 10),
+            ElevatedButton.icon(
+              onPressed: () async {
+                final uri = Uri.parse('https://www.youtube.com/watch?v=${widget.details.trailerKey}');
+                if (await canLaunchUrl(uri)) {
+                  await launchUrl(uri, mode: LaunchMode.externalApplication);
+                }
+              },
+              icon: const Icon(Icons.movie_filter_rounded, size: 24),
+              label: const Text(
+                'Trailer',
+                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Theme.of(context).colorScheme.surfaceContainerHigh,
+                foregroundColor: Theme.of(context).colorScheme.onSurface,
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              ),
+            ),
+          ],
         ],
       ),
     );
@@ -684,7 +712,7 @@ class _CastRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isTv = context.isExpanded;
+    final isWide = context.isExpanded;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -698,7 +726,7 @@ class _CastRow extends StatelessWidget {
         ),
         const SizedBox(height: 12),
         SizedBox(
-          height: isTv ? 120 : 100,
+          height: isWide ? 120 : 100,
           child: ListView.builder(
             scrollDirection: Axis.horizontal,
             itemCount: cast.length,
@@ -707,11 +735,11 @@ class _CastRow extends StatelessWidget {
               return Padding(
                 padding: const EdgeInsets.only(right: 14),
                 child: SizedBox(
-                  width: isTv ? 80 : 65,
+                  width: isWide ? 80 : 65,
                   child: Column(
                     children: [
                       CircleAvatar(
-                        radius: isTv ? 36 : 28,
+                        radius: isWide ? 36 : 28,
                         backgroundColor: Theme.of(context).colorScheme.surfaceContainerHigh,
                         backgroundImage: c.profileUrl.isNotEmpty
                             ? CachedNetworkImageProvider(c.profileUrl)
@@ -726,7 +754,7 @@ class _CastRow extends StatelessWidget {
                         maxLines: 2,
                         textAlign: TextAlign.center,
                         style: TextStyle(
-                          fontSize: isTv ? 11 : 10,
+                          fontSize: isWide ? 11 : 10,
                           color: Theme.of(context).colorScheme.onSurfaceVariant,
                         ),
                       ),
@@ -750,13 +778,13 @@ class _EpisodesSection extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final isTv = context.isExpanded;
+    final isWide = context.isExpanded;
     final selectedSeason = ref.watch(selectedSeasonProvider(details.id));
     final episodes = ref.watch(
       episodesProvider((tmdbId: details.id, season: selectedSeason)),
     );
     final historyService = ref.watch(historyServiceProvider);
-    final hPad = isTv ? 60.0 : 20.0;
+    final hPad = isWide ? 60.0 : 20.0;
 
     return Padding(
       padding: EdgeInsets.symmetric(horizontal: hPad),
@@ -772,7 +800,7 @@ class _EpisodesSection extends ConsumerWidget {
               Text(
                 'Episodes',
                 style: TextStyle(
-                  fontSize: isTv ? 22 : 18,
+                  fontSize: isWide ? 22 : 18,
                   fontWeight: FontWeight.w700,
                   color: Theme.of(context).colorScheme.onSurface,
                 ),
