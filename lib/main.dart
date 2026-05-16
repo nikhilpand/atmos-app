@@ -50,9 +50,12 @@ void main() async {
   final watchlistService = WatchlistService();
   final tmdbService = TmdbService();
 
-  // Parallelize IO and local database inits
+  // Initialize HistoryService first, as it calls Hive.initFlutter()
+  // which must complete before other services try to open boxes.
+  await historyService.init();
+
+  // Parallelize remaining IO and local database inits
   await Future.wait([
-    historyService.init(),
     downloadService.init(downloadDir),
     recommendationService.init(),
     watchlistService.init(),
