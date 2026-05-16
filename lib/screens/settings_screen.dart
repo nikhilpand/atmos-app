@@ -85,6 +85,13 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     final telegram = ref.watch(telegramServiceProvider);
     final cs = Theme.of(context).colorScheme;
 
+    final width = MediaQuery.sizeOf(context).width;
+    final hPad = width >= AppBreakpoints.expanded
+        ? AppSpacing.xxl
+        : width >= AppBreakpoints.compact
+            ? AppSpacing.xl
+            : AppSpacing.md;
+
     return Scaffold(
       appBar: AppBar(
         leading: IconButton(
@@ -93,8 +100,11 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         ),
         title: const Text('Settings'),
       ),
-      body: ListView(
-        padding: const EdgeInsets.symmetric(vertical: AppSpacing.sm, horizontal: AppSpacing.md),
+      body: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 800),
+          child: ListView(
+            padding: EdgeInsets.symmetric(vertical: AppSpacing.sm, horizontal: hPad),
         children: [
           // P14: Card-based section grouping for premium look
           // ── Appearance ────────────────────────────────────────────
@@ -268,6 +278,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
 
           const SizedBox(height: AppSpacing.xl),
         ].animate(interval: 20.ms).fadeIn(duration: 400.ms, curve: AppMotion.emphasizedDecelerate).slideY(begin: 0.1, end: 0, duration: 400.ms, curve: AppMotion.emphasizedCurve),
+          ),
+        ),
       ),
     );
   }
@@ -386,8 +398,8 @@ class _AppearanceSection extends StatelessWidget {
                                 : Colors.transparent,
                             width: isSelected ? 3 : 0,
                           ),
-                          boxShadow: isSelected
-                              ? [BoxShadow(color: entry.seed.withAlpha(100), blurRadius: 8)]
+                              boxShadow: isSelected
+                              ? [BoxShadow(color: entry.seed.withValues(alpha: 0.4), blurRadius: 8)]
                               : null,
                         ),
                         child: isSelected

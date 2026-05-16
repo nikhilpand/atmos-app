@@ -566,7 +566,9 @@ class _PlayButtonState extends ConsumerState<_PlayButton> {
             posterPath: widget.details.posterPath,
           );
           ScaffoldMessenger.of(context).showSnackBar(
+            // ignore: prefer_const_constructors
             SnackBar(
+              // ignore: prefer_const_constructors
               content: Text(
                 'Downloading \${widget.details.title} in \${q.quality} via Telegram ⚡',
               ),

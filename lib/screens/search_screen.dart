@@ -51,7 +51,12 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
     final query = ref.watch(searchQueryProvider);
     final results = ref.watch(searchResultsProvider(query));
     final cs = Theme.of(context).colorScheme;
-    final hPad = context.isExpanded ? AppSpacing.xxl : AppSpacing.md;
+    final width = MediaQuery.sizeOf(context).width;
+    final hPad = width >= AppBreakpoints.expanded
+        ? AppSpacing.xxl
+        : width >= AppBreakpoints.compact
+            ? AppSpacing.xl
+            : AppSpacing.md;
 
     return Scaffold(
       backgroundColor: cs.surface,
@@ -178,7 +183,11 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
                         child: GridView.builder(
                           padding: EdgeInsets.all(hPad),
                           gridDelegate: SliverGridDelegateWithMaxCrossAxisExtent(
-                            maxCrossAxisExtent: context.isExpanded ? 220.0 : 145.0,
+                            maxCrossAxisExtent: context.isExpanded
+                                ? 220.0
+                                : MediaQuery.sizeOf(context).width >= AppBreakpoints.compact
+                                    ? 175.0
+                                    : 145.0,
                             childAspectRatio: 2 / 3.1,
                             crossAxisSpacing: AppSpacing.sm,
                             mainAxisSpacing: AppSpacing.sm,
