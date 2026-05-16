@@ -8,7 +8,9 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'package:screen_brightness/screen_brightness.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:volume_controller/volume_controller.dart';
+import 'package:go_router/go_router.dart';
 import '../services/stream_extractor_service.dart';
+import '../services/subtitle_service.dart' as opensubs;
 import '../providers/providers.dart';
 
 // ─── State ────────────────────────────────────────────────────────────────────
@@ -38,6 +40,11 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
   Timer? _controlsTimer;
   bool _hasAdvanced = false;
   bool _isBuffering = false;
+
+  // Provider status tracking for UI pills
+  final Map<String, ProviderStatus> _providerStatuses = {};
+  String? _currentProviderName; // Currently playing provider
+  String? _preferredProvider; // User-selected server
 
   // Double-tap seek animation
   int? _seekDirection;
@@ -79,6 +86,9 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
   int _countdownSeconds = 0;
   Timer? _countdownTimer;
   bool _showingCountdown = false;
+
+  // ── Continue Watching: periodic position saver ──
+  Timer? _progressTimer;
 
   String get _title => widget.args['title'] as String? ?? 'Untitled';
   String get _type => widget.args['type'] as String? ?? 'movie';
@@ -123,15 +133,47 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
 
   @override
   void dispose() {
+    _progressTimer?.cancel();
     _controlsTimer?.cancel();
     _seekAnimTimer?.cancel();
     _gestureHideTimer?.cancel();
     _countdownTimer?.cancel(); // U7
     _positionSub?.cancel();
+    // Save final watch position before teardown
+    _saveCurrentPosition();
     _player.dispose();
     SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     super.dispose();
+  }
+
+  /// Persist current playback position to HistoryService.
+  void _saveCurrentPosition() {
+    try {
+      final pos = _player.state.position.inSeconds;
+      final dur = _player.state.duration.inSeconds;
+      if (pos < 5 || dur < 10) return; // ignore trivial watches
+      final posterPath = widget.args['posterPath'] as String? ?? '';
+      ref.read(historyServiceProvider).saveProgress(
+        imdbId: _imdbId,
+        tmdbId: int.tryParse(_tmdbId) ?? 0,
+        title: _title,
+        posterPath: posterPath,
+        progressSeconds: pos,
+        totalSeconds: dur,
+        mediaType: _type,
+        season: _type == 'tv' ? _season : null,
+        episode: _type == 'tv' ? _episode : null,
+      );
+    } catch (_) {}
+  }
+
+  /// Start saving position every 10 seconds while playing.
+  void _startProgressTimer() {
+    _progressTimer?.cancel();
+    _progressTimer = Timer.periodic(const Duration(seconds: 10), (_) {
+      if (_state == _ExState.playing) _saveCurrentPosition();
+    });
   }
 
   // ── Extraction ──
@@ -142,6 +184,10 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
       _statusMsg = 'Finding best stream…';
       _providerBadge = '';
       _hasAdvanced = false;
+      _providerStatuses.clear();
+      for (final p in StreamExtractorService.availableProviders) {
+        _providerStatuses[p] = ProviderStatus.idle;
+      }
     });
 
     debugPrint('[NativePlayer] type=$_type imdbId=$_imdbId tmdbId=$_tmdbId S$_season E$_episode');
@@ -160,26 +206,177 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
     if (!mounted) return;
     if (workerStream != null) { _playStream(workerStream); return; }
 
-    // ── Step 2: Direct API (VidAPI + Videasy race, ~2-5s) ──
-    if (mounted) setState(() => _statusMsg = 'Extracting from providers…');
+    // ── Step 2: Sequential fallback with status reporting ──
+    if (mounted) setState(() => _statusMsg = 'Trying providers…');
 
-    final directStream = await _extractor.extractDirectAPIs(
+    final directStream = await _extractor.extractWithStatus(
       imdbId: _imdbId,
       tmdbId: _tmdbId,
       type: _type,
       title: _title,
       season: _season,
       episode: _episode,
+      preferredProvider: _preferredProvider,
+      onStatus: (name, status) {
+        if (!mounted) return;
+        setState(() {
+          _providerStatuses[name] = status;
+          if (status == ProviderStatus.trying) {
+            _statusMsg = 'Trying $name…';
+          }
+        });
+      },
     );
 
     if (!mounted) return;
-    if (directStream != null) { _playStream(directStream); return; }
+    if (directStream != null) {
+      _currentProviderName = directStream.providerName;
+      // Auto-resume: check if user has a saved position for this content
+      final savedProgress = ref.read(historyServiceProvider).getProgress(
+        _imdbId,
+        season: _type == 'tv' ? _season : null,
+        episode: _type == 'tv' ? _episode : null,
+      );
+      final resumeFrom = savedProgress != null
+          ? Duration(seconds: savedProgress.progressSeconds)
+          : null;
+      _playStream(directStream, resumeFrom: resumeFrom);
+      return;
+    }
 
     // ── Failed ──
     setState(() {
       _state = _ExState.failed;
       _failedMsg = 'No streams available.\nTap Retry to try again.';
     });
+  }
+
+  /// Re-race all providers excluding the current one — picks the fastest new source
+  Future<void> _tryAnotherSource() async {
+    final current = _currentProviderName ?? '';
+    final pos = _player.state.position;
+
+    setState(() {
+      _state = _ExState.extracting;
+      _statusMsg = 'Finding best source…';
+      // Reset pills — all back to trying
+      for (final p in StreamExtractorService.availableProviders) {
+        _providerStatuses[p] = ProviderStatus.idle;
+      }
+    });
+
+    // Extract the base provider name (strip quality suffix like "VidAPI (HD)")
+    final currentBase = StreamExtractorService.availableProviders
+        .firstWhere((p) => current.startsWith(p), orElse: () => '');
+
+    // Re-run the parallel race, skipping only the current provider
+    final result = await _extractor.extractWithStatus(
+      imdbId: _imdbId,
+      tmdbId: _tmdbId,
+      type: _type,
+      title: _title,
+      season: _season,
+      episode: _episode,
+      // Pass current as preferred=null so race picks the next fastest
+      onStatus: (name, status) {
+        if (!mounted) return;
+        // Don't override success status from a previous winner
+        if (_providerStatuses[name] == ProviderStatus.success) return;
+        setState(() => _providerStatuses[name] = status);
+      },
+    );
+
+    if (!mounted) return;
+
+    if (result != null && !result.providerName.startsWith(currentBase)) {
+      _currentProviderName = result.providerName;
+      _playStream(result, resumeFrom: pos);
+    } else if (result != null) {
+      // Same provider came back — still play it (best we can do)
+      _currentProviderName = result.providerName;
+      _playStream(result, resumeFrom: pos);
+    } else if (_currentStream != null) {
+      // Nothing worked — resume current stream
+      _playStream(_currentStream!, resumeFrom: pos);
+    } else {
+      setState(() {
+        _state = _ExState.failed;
+        _failedMsg = 'No other sources available.';
+      });
+    }
+  }
+
+  // ── Download current stream ──
+
+  Future<void> _downloadCurrentStream() async {
+    final stream = _currentStream;
+    if (stream == null) return;
+
+    final dl = ref.read(downloadServiceProvider);
+    final tmdbId = int.tryParse(_tmdbId) ?? 0;
+    final quality = _activeQuality.isNotEmpty ? _activeQuality : stream.providerName;
+
+    // HLS streams: guide user to Telegram CDN download instead of blocking silently
+    if (stream.isHls) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: const Text('Queuing for download…'),
+          behavior: SnackBarBehavior.floating,
+          action: SnackBarAction(
+            label: 'View',
+            onPressed: () => context.push('/downloads'),
+          ),
+        ),
+      );
+      // Queue via HTTP download — service will handle HLS gracefully
+      dl.startStreamDownload(
+        tmdbId: int.tryParse(_tmdbId) ?? 0,
+        imdbId: _imdbId,
+        title: _title,
+        mediaType: _type,
+        streamUrl: stream.url,
+        quality: quality,
+        headers: stream.headers,
+        season: _type == 'tv' ? _season : null,
+        episode: _type == 'tv' ? _episode : null,
+      );
+      return;
+    }
+
+    // Check not already downloading
+    if (dl.isDownloading(tmdbId, season: _type == 'tv' ? _season : null, episode: _type == 'tv' ? _episode : null)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Already downloading this title.'),
+          behavior: SnackBarBehavior.floating,
+        ),
+      );
+      return;
+    }
+
+    dl.startStreamDownload(
+      tmdbId: tmdbId,
+      imdbId: _imdbId,
+      title: _title,
+      mediaType: _type,
+      streamUrl: stream.url,
+      quality: quality,
+      headers: stream.headers,
+      season: _type == 'tv' ? _season : null,
+      episode: _type == 'tv' ? _episode : null,
+    );
+
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('Saving "$_title" ($quality)…'),
+        behavior: SnackBarBehavior.floating,
+        action: SnackBarAction(
+          label: 'Downloads',
+          onPressed: () => context.push('/downloads'),
+        ),
+      ),
+    );
   }
 
   // U11: Play a locally downloaded file directly via media_kit (no extraction)
@@ -217,6 +414,9 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
       await Future.delayed(const Duration(milliseconds: 500));
       await _player.seek(resumeFrom);
     }
+
+    // Start periodic position saver (every 10s)
+    _startProgressTimer();
 
     // Track progress for history + auto-advance
     // Cancel previous subscription to prevent listener leak on quality switch
@@ -266,17 +466,15 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
               stream: _currentStream,
               activeQuality: _activeQuality,
               activeSubtitle: _activeSubtitle,
-              onQualitySelect: (q) {
-                _switchQuality(q);
-                Navigator.pop(context);
-              },
-              onSubtitleSelect: (sub) {
-                _toggleSubtitle(sub);
-                Navigator.pop(context);
-              },
+              imdbId: _imdbId,
+              mediaType: _type,
+              season: _season,
+              episode: _episode,
+              onQualitySelect: (q) { _switchQuality(q); Navigator.pop(context); },
+              onSubtitleSelect: (sub) { _toggleSubtitle(sub); Navigator.pop(context); },
               onAudioSelect: (track) {
                 _player.setAudioTrack(track);
-                setState(() {}); // Rebuild to reflect active track
+                setState(() {});
                 Navigator.pop(context);
               },
             ),
@@ -734,6 +932,7 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
                       state: _state,
                       message: _state == _ExState.failed ? (_failedMsg ?? 'Unknown error') : _statusMsg,
                       onRetry: _state == _ExState.failed ? _startExtraction : null,
+                      providerStatuses: _providerStatuses,
                     ),
                   ),
 
@@ -765,6 +964,10 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
                           _advanceEpisode();
                         } : null,
                         onSettings: _showPlayerSettings,
+                        onSwitchSource: _tryAnotherSource,
+                        onDownload: _currentStream != null
+                            ? _downloadCurrentStream
+                            : null,
                       ),
                     ),
                   ),
@@ -833,11 +1036,13 @@ class _StatusOverlay extends StatelessWidget {
   final _ExState state;
   final String message;
   final VoidCallback? onRetry;
+  final Map<String, ProviderStatus> providerStatuses;
 
   const _StatusOverlay({
     required this.state,
     required this.message,
     this.onRetry,
+    this.providerStatuses = const {},
   });
 
   @override
@@ -851,9 +1056,20 @@ class _StatusOverlay extends StatelessWidget {
             mainAxisSize: MainAxisSize.min,
             children: [
               if (state == _ExState.extracting) ...[
-                // P5: Properly looping pulse — old TweenAnimationBuilder fired once and stopped
                 const _PulsingSpinner(),
                 const SizedBox(height: 24),
+                // Provider status pills
+                if (providerStatuses.isNotEmpty) ...[
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 6,
+                    alignment: WrapAlignment.center,
+                    children: providerStatuses.entries.map((e) {
+                      return _ProviderPill(name: e.key, status: e.value);
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 16),
+                ],
                 Text(
                   message,
                   style: const TextStyle(color: Colors.white70, fontSize: 15),
@@ -888,6 +1104,56 @@ class _StatusOverlay extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+// ─── Provider Status Pill ─────────────────────────────────────────────────────
+
+class _ProviderPill extends StatelessWidget {
+  final String name;
+  final ProviderStatus status;
+  const _ProviderPill({required this.name, required this.status});
+
+  @override
+  Widget build(BuildContext context) {
+    final (Color bg, Color fg, IconData? icon) = switch (status) {
+      ProviderStatus.idle    => (Colors.white10, Colors.white38, null),
+      ProviderStatus.trying  => (Colors.deepPurpleAccent.withValues(alpha: 0.2), Colors.deepPurpleAccent, null),
+      ProviderStatus.success => (Colors.green.withValues(alpha: 0.2), Colors.greenAccent, Icons.check_circle_rounded),
+      ProviderStatus.failed  => (Colors.red.withValues(alpha: 0.15), Colors.redAccent.withValues(alpha: 0.7), Icons.cancel_rounded),
+    };
+
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 300),
+      curve: Curves.easeOut,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(20),
+        border: status == ProviderStatus.trying
+            ? Border.all(color: Colors.deepPurpleAccent.withValues(alpha: 0.4), width: 1)
+            : null,
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (status == ProviderStatus.trying)
+            const Padding(
+              padding: EdgeInsets.only(right: 6),
+              child: SizedBox(
+                width: 10, height: 10,
+                child: CircularProgressIndicator(color: Colors.deepPurpleAccent, strokeWidth: 1.5),
+              ),
+            ),
+          if (icon != null)
+            Padding(
+              padding: const EdgeInsets.only(right: 4),
+              child: Icon(icon, size: 12, color: fg),
+            ),
+          Text(name, style: TextStyle(color: fg, fontSize: 11, fontWeight: FontWeight.w600)),
+        ],
       ),
     );
   }
@@ -1044,6 +1310,8 @@ class _ControlsOverlay extends StatelessWidget {
   final VoidCallback onToggleFit;
   final VoidCallback? onNextEpisode;
   final VoidCallback onSettings;
+  final VoidCallback? onSwitchSource;
+  final VoidCallback? onDownload;
 
   const _ControlsOverlay({
     required this.title,
@@ -1063,235 +1331,252 @@ class _ControlsOverlay extends StatelessWidget {
     required this.onToggleFit,
     this.onNextEpisode,
     required this.onSettings,
+    this.onSwitchSource,
+    this.onDownload,
   });
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedOpacity(
-      opacity: 1.0,
-      duration: const Duration(milliseconds: 200),
-      child: Container(
-        decoration: const BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topCenter,
-            end: Alignment.bottomCenter,
-            colors: [Color(0xCC000000), Colors.transparent, Colors.transparent, Color(0xCC000000)],
-            stops: [0, 0.25, 0.7, 1],
-          ),
+    final size = MediaQuery.of(context).size;
+    final isTablet = size.shortestSide >= 600;
+    final cs = Theme.of(context).colorScheme;
+
+    return Container(
+      decoration: const BoxDecoration(
+        gradient: LinearGradient(
+          begin: Alignment.topCenter,
+          end: Alignment.bottomCenter,
+          colors: [Color(0xD0000000), Colors.transparent, Colors.transparent, Color(0xD0000000)],
+          stops: [0.0, 0.28, 0.68, 1.0],
         ),
-        child: SafeArea(
-          child: Column(
-            children: [
-              // ── Top bar ──
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                child: Row(
-                  children: [
-                    IconButton(
-                      onPressed: onBack,
-                      icon: const Icon(Icons.arrow_back_ios_new, color: Colors.white, size: 20),
-                    ),
-                    const SizedBox(width: 4),
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          Text(title,
-                            style: const TextStyle(color: Colors.white, fontSize: 15, fontWeight: FontWeight.w600),
-                            maxLines: 1, overflow: TextOverflow.ellipsis),
-                          if (type == 'tv')
-                            Text('S${season.toString().padLeft(2, '0')} · E${episode.toString().padLeft(2, '0')}',
-                              style: const TextStyle(color: Colors.white54, fontSize: 12)),
-                        ],
-                      ),
-                    ),
-                    // Lock button  
-                    _OverlayIconBtn(
-                      icon: isLocked ? Icons.lock_rounded : Icons.lock_open_rounded,
-                      onTap: onLock,
-                      tooltip: isLocked ? 'Unlock' : 'Lock',
-                    ),
-                    // Fit/Fill toggle
-                    _OverlayIconBtn(
-                      icon: isFitMode ? Icons.fit_screen_rounded : Icons.crop_free_rounded,
-                      onTap: onToggleFit,
-                      tooltip: isFitMode ? 'Fill' : 'Fit',
-                    ),
-                    // Provider badge (info only)
-                    if (providerName.isNotEmpty)
-                      Container(
-                        margin: const EdgeInsets.only(left: 6),
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: Colors.deepPurpleAccent.withValues(alpha: 0.15),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: Text(providerName.toUpperCase(),
-                          style: const TextStyle(color: Colors.deepPurpleAccent, fontSize: 9,
-                            fontWeight: FontWeight.w700, letterSpacing: 0.8)),
-                      ),
-                  ],
-                ),
-              ),
+      ),
+      child: SafeArea(
+        child: Column(
+          children: [
+            // ── Top bar ──────────────────────────────────────────────────────
+            _TopBar(
+              title: title,
+              type: type,
+              season: season,
+              episode: episode,
+              providerName: providerName,
+              isLocked: isLocked,
+              isFitMode: isFitMode,
+              onBack: onBack,
+              onLock: onLock,
+              onToggleFit: onToggleFit,
+              onSwitchSource: onSwitchSource,
+              isTablet: isTablet,
+            ),
 
-              const Spacer(),
+            const Spacer(),
 
-              // ── Center controls ──
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  _SeekButton(icon: Icons.replay_10, label: '-10s', onTap: onSeekBack),
-                  const SizedBox(width: 32),
-                  StreamBuilder<bool>(
-                    stream: player.stream.playing,
-                    builder: (_, snap) {
-                      final playing = snap.data ?? false;
-                      return GestureDetector(
-                        onTap: player.playOrPause,
-                        child: Container(
-                          width: 64, height: 64,
-                          decoration: BoxDecoration(
-                            color: Colors.white.withValues(alpha: 0.15),
-                            shape: BoxShape.circle,
-                            border: Border.all(color: Colors.white30, width: 1.5),
-                          ),
-                          child: AnimatedSwitcher(
-                            duration: const Duration(milliseconds: 200),
-                            child: Icon(
-                              playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
-                              key: ValueKey(playing),
-                              color: Colors.white, size: 36,
-                            ),
-                          ),
-                        ),
-                      );
-                    },
-                  ),
-                  const SizedBox(width: 32),
-                  _SeekButton(icon: Icons.forward_10, label: '+10s', onTap: onSeekForward),
-                  if (onNextEpisode != null) ...[
-                    const SizedBox(width: 32),
-                    _SeekButton(icon: Icons.skip_next_rounded, label: 'Next', onTap: onNextEpisode!),
-                  ],
-                ],
-              ),
+            // ── Center play controls ──────────────────────────────────────────
+            _CenterControls(
+              player: player,
+              onSeekBack: onSeekBack,
+              onSeekForward: onSeekForward,
+              onNextEpisode: onNextEpisode,
+              isTablet: isTablet,
+            ),
 
-              const Spacer(),
+            const Spacer(),
 
-              // ── Bottom bar ──
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                child: StreamBuilder<Duration>(
-                  stream: player.stream.position,
-                  builder: (_, posSnap) {
-                    return StreamBuilder<Duration>(
-                      stream: player.stream.duration,
-                      builder: (_, durSnap) {
-                        final pos = posSnap.data ?? Duration.zero;
-                        final dur = durSnap.data ?? Duration.zero;
-                        final progress = dur.inMilliseconds > 0
-                            ? (pos.inMilliseconds / dur.inMilliseconds).clamp(0.0, 1.0)
-                            : 0.0;
-                        final remaining = dur - pos;
-
-                        return Column(
-                          children: [
-                            // Seekbar with buffered progress underneath
-                            Stack(
-                              children: [
-                                // Buffered bar
-                                StreamBuilder<Duration>(
-                                  stream: player.stream.buffer,
-                                  builder: (_, bufSnap) {
-                                    final buf = bufSnap.data ?? Duration.zero;
-                                    final bufProgress = dur.inMilliseconds > 0
-                                        ? (buf.inMilliseconds / dur.inMilliseconds).clamp(0.0, 1.0)
-                                        : 0.0;
-                                    return Padding(
-                                      padding: const EdgeInsets.symmetric(horizontal: 24),
-                                      child: ClipRRect(
-                                        borderRadius: BorderRadius.circular(2),
-                                        child: LinearProgressIndicator(
-                                          value: bufProgress,
-                                          backgroundColor: Colors.white12,
-                                          valueColor: const AlwaysStoppedAnimation<Color>(Colors.white24),
-                                          minHeight: 3,
-                                        ),
-                                      ),
-                                    );
-                                  },
-                                ),
-                                // Seek slider
-                                SliderTheme(
-                                  data: SliderTheme.of(context).copyWith(
-                                    trackHeight: 3,
-                                    thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
-                                    overlayShape: const RoundSliderOverlayShape(overlayRadius: 16),
-                                    activeTrackColor: Colors.white,
-                                    inactiveTrackColor: Colors.transparent,
-                                    thumbColor: Colors.white,
-                                    overlayColor: Colors.white24,
-                                  ),
-                                  child: Slider(
-                                    value: progress,
-                                    onChanged: (v) {
-                                      final newPos = Duration(milliseconds: (v * dur.inMilliseconds).toInt());
-                                      player.seek(newPos);
-                                    },
-                                  ),
-                                ),
-                              ],
-                            ),
-                            // Time + controls row
-                            Row(
-                              children: [
-                                Text(_fmt(pos), style: const TextStyle(color: Colors.white70, fontSize: 12)),
-                                const SizedBox(width: 6),
-                                Text('-${_fmt(remaining)}', style: const TextStyle(color: Colors.white38, fontSize: 11)),
-                                const Spacer(),
-                                // Settings button
-                                _BottomPill(
-                                  icon: Icons.settings_rounded,
-                                  label: 'SETTINGS',
-                                  isActive: false,
-                                  onTap: onSettings,
-                                ),
-                                const SizedBox(width: 6),
-                                // Speed pill
-                                GestureDetector(
-                                  onTap: onCycleSpeed,
-                                  child: Container(
-                                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                                    decoration: BoxDecoration(
-                                      color: playbackSpeed != 1.0
-                                          ? Colors.white.withValues(alpha: 0.2)
-                                          : Colors.white.withValues(alpha: 0.1),
-                                      borderRadius: BorderRadius.circular(4),
-                                    ),
-                                    child: Text('$playbackSpeed×',
-                                      style: TextStyle(
-                                        color: playbackSpeed != 1.0 ? Colors.white : Colors.white70,
-                                        fontSize: 11, fontWeight: FontWeight.w600,
-                                      )),
-                                  ),
-                                ),
-                                const SizedBox(width: 8),
-                                Text(_fmt(dur), style: const TextStyle(color: Colors.white54, fontSize: 12)),
-                              ],
-                            ),
-                          ],
-                        );
-                      },
-                    );
-                  },
-                ),
-              ),
-            ],
-          ),
+            // ── Bottom bar ───────────────────────────────────────────────────
+            _BottomBar(
+              player: player,
+              playbackSpeed: playbackSpeed,
+              onSettings: onSettings,
+              onDownload: onDownload,
+              onCycleSpeed: onCycleSpeed,
+              isTablet: isTablet,
+              cs: cs,
+            ),
+          ],
         ),
       ),
     );
   }
+
+}
+
+// ─── Top bar ──────────────────────────────────────────────────────────────────
+
+class _TopBar extends StatelessWidget {
+  final String title, type, providerName;
+  final int season, episode;
+  final bool isLocked, isFitMode, isTablet;
+  final VoidCallback onBack, onLock, onToggleFit;
+  final VoidCallback? onSwitchSource;
+
+  const _TopBar({
+    required this.title, required this.type, required this.providerName,
+    required this.season, required this.episode,
+    required this.isLocked, required this.isFitMode, required this.isTablet,
+    required this.onBack, required this.onLock, required this.onToggleFit,
+    this.onSwitchSource,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final iconSize = isTablet ? 22.0 : 20.0;
+    return Padding(
+      padding: EdgeInsets.symmetric(horizontal: isTablet ? 20.0 : 8.0, vertical: 4),
+      child: Row(
+        children: [
+          // Back
+          Material(
+            color: Colors.transparent,
+            borderRadius: BorderRadius.circular(24),
+            child: InkWell(
+              onTap: onBack,
+              borderRadius: BorderRadius.circular(24),
+              child: Padding(
+                padding: const EdgeInsets.all(10),
+                child: Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: iconSize),
+              ),
+            ),
+          ),
+          const SizedBox(width: 4),
+          // Title + episode
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(title,
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: isTablet ? 17 : 14,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: -0.2,
+                  ),
+                  maxLines: 1, overflow: TextOverflow.ellipsis),
+                if (type == 'tv')
+                  Text(
+                    'S${season.toString().padLeft(2, '0')} · E${episode.toString().padLeft(2, '0')}',
+                    style: TextStyle(color: Colors.white54, fontSize: isTablet ? 13 : 11),
+                  ),
+              ],
+            ),
+          ),
+          // Provider badge
+          if (providerName.isNotEmpty) ...[
+            GestureDetector(
+              onTap: onSwitchSource,
+              child: Container(
+                margin: const EdgeInsets.only(right: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.white.withValues(alpha: 0.12),
+                  borderRadius: BorderRadius.circular(6),
+                  border: Border.all(color: Colors.white24, width: 0.5),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(providerName.toUpperCase(),
+                      style: const TextStyle(
+                        color: Colors.white70, fontSize: 9,
+                        fontWeight: FontWeight.w700, letterSpacing: 0.8,
+                      )),
+                    if (onSwitchSource != null) ...[
+                      const SizedBox(width: 4),
+                      const Icon(Icons.swap_horiz_rounded, color: Colors.white54, size: 11),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ],
+          // Fit toggle
+          _GlassIconBtn(icon: isFitMode ? Icons.fit_screen_rounded : Icons.crop_free_rounded,
+            tooltip: isFitMode ? 'Fill' : 'Fit', onTap: onToggleFit, size: iconSize),
+          // Lock
+          _GlassIconBtn(icon: isLocked ? Icons.lock_rounded : Icons.lock_open_rounded,
+            tooltip: isLocked ? 'Unlock' : 'Lock', onTap: onLock, size: iconSize),
+        ],
+      ),
+    );
+  }
+}
+
+// ─── Center controls ──────────────────────────────────────────────────────────
+
+class _CenterControls extends StatelessWidget {
+  final Player player;
+  final VoidCallback onSeekBack, onSeekForward;
+  final VoidCallback? onNextEpisode;
+  final bool isTablet;
+
+  const _CenterControls({
+    required this.player, required this.onSeekBack,
+    required this.onSeekForward, required this.isTablet, this.onNextEpisode,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final btnSize = isTablet ? 72.0 : 60.0;
+    final seekSize = isTablet ? 36.0 : 30.0;
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        _SeekBtn(icon: Icons.replay_10_rounded, label: '10s', onTap: onSeekBack, size: seekSize),
+        SizedBox(width: isTablet ? 40.0 : 28.0),
+        // Play/Pause — M3 Expressive filled circle
+        StreamBuilder<bool>(
+          stream: player.stream.playing,
+          builder: (_, snap) {
+            final playing = snap.data ?? false;
+            return GestureDetector(
+              onTap: player.playOrPause,
+              child: Container(
+                width: btnSize, height: btnSize,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: Colors.white.withValues(alpha: 0.18),
+                  border: Border.all(color: Colors.white30, width: 1.5),
+                  boxShadow: const [BoxShadow(color: Colors.black38, blurRadius: 16, spreadRadius: 2)],
+                ),
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 180),
+                  transitionBuilder: (child, anim) => ScaleTransition(scale: anim, child: child),
+                  child: Icon(
+                    playing ? Icons.pause_rounded : Icons.play_arrow_rounded,
+                    key: ValueKey(playing),
+                    color: Colors.white, size: btnSize * 0.56,
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+        SizedBox(width: isTablet ? 40.0 : 28.0),
+        _SeekBtn(icon: Icons.forward_10_rounded, label: '10s', onTap: onSeekForward, size: seekSize),
+        if (onNextEpisode != null) ...[
+          SizedBox(width: isTablet ? 28.0 : 20.0),
+          _SeekBtn(icon: Icons.skip_next_rounded, label: 'Next', onTap: onNextEpisode!, size: seekSize),
+        ],
+      ],
+    );
+  }
+}
+
+// ─── Bottom bar ───────────────────────────────────────────────────────────────
+
+class _BottomBar extends StatelessWidget {
+  final Player player;
+  final double playbackSpeed;
+  final VoidCallback onSettings, onCycleSpeed;
+  final VoidCallback? onDownload;
+  final bool isTablet;
+  final ColorScheme cs;
+
+  const _BottomBar({
+    required this.player, required this.playbackSpeed,
+    required this.onSettings, required this.onCycleSpeed,
+    required this.isTablet, required this.cs, this.onDownload,
+  });
 
   String _fmt(Duration d) {
     final h = d.inHours;
@@ -1299,111 +1584,212 @@ class _ControlsOverlay extends StatelessWidget {
     final s = d.inSeconds.remainder(60).toString().padLeft(2, '0');
     return h > 0 ? '$h:$m:$s' : '$m:$s';
   }
-}
-
-// ─── Small Icon Button for overlay ────────────────────────────────────────────
-
-class _OverlayIconBtn extends StatelessWidget {
-  final IconData icon;
-  final VoidCallback onTap;
-  final String tooltip;
-  const _OverlayIconBtn({required this.icon, required this.onTap, required this.tooltip});
 
   @override
   Widget build(BuildContext context) {
-    return Tooltip(
-      message: tooltip,
+    return Padding(
+      padding: EdgeInsets.fromLTRB(isTablet ? 20.0 : 12.0, 0, isTablet ? 20.0 : 12.0, isTablet ? 12.0 : 8.0),
+      child: StreamBuilder<Duration>(
+        stream: player.stream.position,
+        builder: (_, posSnap) => StreamBuilder<Duration>(
+          stream: player.stream.duration,
+          builder: (_, durSnap) {
+            final pos = posSnap.data ?? Duration.zero;
+            final dur = durSnap.data ?? Duration.zero;
+            final progress = dur.inMilliseconds > 0
+                ? (pos.inMilliseconds / dur.inMilliseconds).clamp(0.0, 1.0)
+                : 0.0;
+
+            return Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                // Seekbar stack (buffered + active)
+                Stack(
+                  children: [
+                    StreamBuilder<Duration>(
+                      stream: player.stream.buffer,
+                      builder: (_, bufSnap) {
+                        final buf = bufSnap.data ?? Duration.zero;
+                        final bufPct = dur.inMilliseconds > 0
+                            ? (buf.inMilliseconds / dur.inMilliseconds).clamp(0.0, 1.0)
+                            : 0.0;
+                        return Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 24),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(2),
+                            child: LinearProgressIndicator(
+                              value: bufPct.toDouble(),
+                              backgroundColor: Colors.white10,
+                              valueColor: const AlwaysStoppedAnimation<Color>(Color(0x1FFFFFFF)),
+                              minHeight: 3,
+                            ),
+                          ),
+                        );
+                      },
+                    ),
+                    SliderTheme(
+                      data: SliderTheme.of(context).copyWith(
+                        trackHeight: isTablet ? 4.0 : 3.0,
+                        thumbShape: RoundSliderThumbShape(enabledThumbRadius: isTablet ? 8 : 6),
+                        overlayShape: RoundSliderOverlayShape(overlayRadius: isTablet ? 18 : 14),
+                        activeTrackColor: Colors.white,
+                        inactiveTrackColor: Colors.transparent,
+                        thumbColor: Colors.white,
+                        overlayColor: const Color(0x1FFFFFFF),
+                      ),
+                      child: Slider(
+                        value: progress,
+                        onChanged: (v) => player.seek(
+                          Duration(milliseconds: (v * dur.inMilliseconds).toInt())),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 2),
+                // Time row + action pills
+                Row(
+                  children: [
+                    Text(_fmt(pos), style: TextStyle(color: Colors.white70, fontSize: isTablet ? 13 : 11)),
+                    const SizedBox(width: 4),
+                    Text('-${_fmt(dur - pos)}', style: TextStyle(color: Colors.white38, fontSize: isTablet ? 12 : 10)),
+                    const Spacer(),
+                    // Settings pill
+                    _ActionPill(icon: Icons.tune_rounded, label: 'Settings', onTap: onSettings),
+                    if (onDownload != null) ...[
+                      const SizedBox(width: 6),
+                      _ActionPill(icon: Icons.download_rounded, label: 'Save', onTap: onDownload!),
+                    ],
+                    const SizedBox(width: 6),
+                    // Speed pill
+                    GestureDetector(
+                      onTap: onCycleSpeed,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: playbackSpeed != 1.0
+                              ? cs.primaryContainer.withValues(alpha: 0.5)
+                              : Colors.white.withValues(alpha: 0.1),
+                          borderRadius: BorderRadius.circular(6),
+                          border: playbackSpeed != 1.0
+                              ? Border.all(color: cs.primary.withValues(alpha: 0.4), width: 0.8)
+                              : null,
+                        ),
+                        child: Text('$playbackSpeed×',
+                          style: TextStyle(
+                            color: playbackSpeed != 1.0 ? cs.primary : Colors.white70,
+                            fontSize: isTablet ? 12 : 10,
+                            fontWeight: FontWeight.w700,
+                          )),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Text(_fmt(dur), style: TextStyle(color: Colors.white54, fontSize: isTablet ? 13 : 11)),
+                  ],
+                ),
+              ],
+            );
+          },
+        ),
+      ),
+    );
+  }
+}
+
+// ─── Reusable glass icon button ───────────────────────────────────────────────
+
+class _GlassIconBtn extends StatelessWidget {
+  final IconData icon;
+  final String tooltip;
+  final VoidCallback onTap;
+  final double size;
+  const _GlassIconBtn({required this.icon, required this.tooltip, required this.onTap, required this.size});
+
+  @override
+  Widget build(BuildContext context) => Tooltip(
+    message: tooltip,
+    child: Material(
+      color: Colors.transparent,
+      borderRadius: BorderRadius.circular(22),
       child: InkWell(
         onTap: onTap,
-        borderRadius: BorderRadius.circular(20),
+        borderRadius: BorderRadius.circular(22),
         child: Padding(
-          padding: const EdgeInsets.all(8),
-          child: Icon(icon, color: Colors.white70, size: 20),
+          padding: const EdgeInsets.all(9),
+          child: Icon(icon, color: Colors.white70, size: size),
         ),
       ),
-    );
-  }
+    ),
+  );
 }
 
-class _SeekButton extends StatelessWidget {
+// ─── Seek button ──────────────────────────────────────────────────────────────
+
+class _SeekBtn extends StatelessWidget {
   final IconData icon;
   final String label;
   final VoidCallback onTap;
-  const _SeekButton({required this.icon, required this.label, required this.onTap});
+  final double size;
+  const _SeekBtn({required this.icon, required this.label, required this.onTap, required this.size});
 
   @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Column(
+  Widget build(BuildContext context) => GestureDetector(
+    onTap: onTap,
+    child: Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Icon(icon, color: Colors.white, size: size),
+        const SizedBox(height: 3),
+        Text(label, style: const TextStyle(color: Colors.white54, fontSize: 10)),
+      ],
+    ),
+  );
+}
+
+// ─── Action pill (Settings / Save) ───────────────────────────────────────────
+
+class _ActionPill extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final VoidCallback onTap;
+  const _ActionPill({required this.icon, required this.label, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) => GestureDetector(
+    onTap: onTap,
+    child: Container(
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+      decoration: BoxDecoration(
+        color: Colors.white.withValues(alpha: 0.1),
+        borderRadius: BorderRadius.circular(6),
+        border: Border.all(color: Colors.white12, width: 0.5),
+      ),
+      child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(icon, color: Colors.white, size: 32),
-          const SizedBox(height: 2),
-          Text(label, style: const TextStyle(color: Colors.white54, fontSize: 11)),
+          Icon(icon, color: Colors.white70, size: 13),
+          const SizedBox(width: 4),
+          Text(label, style: const TextStyle(color: Colors.white70, fontSize: 10, fontWeight: FontWeight.w600)),
         ],
       ),
-    );
-  }
+    ),
+  );
 }
 
-// ─── Bottom Pill Button (Subtitle / Quality / Speed) ──────────────────────────
 
-class _BottomPill extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final bool isActive;
-  final VoidCallback onTap;
-
-  const _BottomPill({
-    required this.icon,
-    required this.label,
-    required this.isActive,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-        decoration: BoxDecoration(
-          color: isActive
-              ? Colors.deepPurpleAccent.withValues(alpha: 0.25)
-              : Colors.white.withValues(alpha: 0.1),
-          borderRadius: BorderRadius.circular(4),
-          border: isActive
-              ? Border.all(color: Colors.deepPurpleAccent.withValues(alpha: 0.5), width: 0.5)
-              : null,
-        ),
-        child: Row(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(icon, color: isActive ? Colors.deepPurpleAccent : Colors.white70, size: 14),
-            const SizedBox(width: 4),
-            Text(label,
-              style: TextStyle(
-                color: isActive ? Colors.deepPurpleAccent : Colors.white70,
-                fontSize: 10, fontWeight: FontWeight.w600,
-              )),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-// ─── Unified Player Settings Sheet ──────────────────────────────────────────
+// ─── Unified Player Settings Sheet (M3 Expressive) ───────────────────────────
 
 class _PlayerSettingsSheet extends StatefulWidget {
   final Player player;
   final ExtractedStream? stream;
   final String activeQuality;
   final ValueChanged<QualityOption> onQualitySelect;
-  final ValueChanged<dynamic> onSubtitleSelect; // SubtitleTrack or int
+  final ValueChanged<dynamic> onSubtitleSelect;
   final ValueChanged<AudioTrack> onAudioSelect;
-  final dynamic activeSubtitle; // SubtitleTrack or int
+  final dynamic activeSubtitle;
+  final String imdbId;
+  final String mediaType;
+  final int season;
+  final int episode;
 
   const _PlayerSettingsSheet({
     required this.player,
@@ -1413,6 +1799,10 @@ class _PlayerSettingsSheet extends StatefulWidget {
     required this.onSubtitleSelect,
     required this.onAudioSelect,
     required this.activeSubtitle,
+    required this.imdbId,
+    required this.mediaType,
+    this.season = 0,
+    this.episode = 0,
   });
 
   @override
@@ -1420,226 +1810,353 @@ class _PlayerSettingsSheet extends StatefulWidget {
 }
 
 class _PlayerSettingsSheetState extends State<_PlayerSettingsSheet> {
-  String _activeTab = 'Quality';
+  int _tabIndex = 0; // 0=Quality 1=Audio 2=Subtitles
 
-  static const _langNames = {
-    'eng': 'English', 'en': 'English', 'english': 'English',
-    'spa': 'Spanish', 'es': 'Spanish', 'spanish': 'Spanish',
-    'fre': 'French', 'fr': 'French', 'french': 'French',
-    'ger': 'German', 'de': 'German', 'german': 'German',
-    'ita': 'Italian', 'it': 'Italian', 'italian': 'Italian',
-    'por': 'Portuguese', 'pt': 'Portuguese', 'portuguese': 'Portuguese',
-    'rus': 'Russian', 'ru': 'Russian', 'russian': 'Russian',
-    'jpn': 'Japanese', 'ja': 'Japanese', 'japanese': 'Japanese',
-    'kor': 'Korean', 'ko': 'Korean', 'korean': 'Korean',
-    'chi': 'Chinese', 'zh': 'Chinese', 'chinese': 'Chinese',
-    'ara': 'Arabic', 'ar': 'Arabic', 'arabic': 'Arabic',
-    'hin': 'Hindi', 'hi': 'Hindi', 'hindi': 'Hindi',
+  // OpenSubtitles state
+  String _subLang = 'en';
+  bool _subLoading = false;
+  List<SubtitleInfo> _osResults = []; // fetched from OpenSubtitles
+  String? _subError;
+
+  static const _langNames = <String, String>{
+    'en': 'English', 'es': 'Spanish', 'fr': 'French', 'de': 'German',
+    'hi': 'Hindi', 'ar': 'Arabic', 'zh-cn': 'Chinese', 'ja': 'Japanese',
+    'ko': 'Korean', 'ru': 'Russian', 'it': 'Italian', 'pt': 'Portuguese',
+    'tr': 'Turkish', 'pl': 'Polish', 'nl': 'Dutch',
   };
 
-  String _formatLang(String? lang) {
-    if (lang == null || lang.isEmpty) return 'Unknown';
-    return _langNames[lang.toLowerCase()] ?? lang.toUpperCase();
+  String _fmtLang(String? l) {
+    if (l == null || l.isEmpty) return '?';
+    return _langNames[l.toLowerCase()] ??
+        {'eng': 'English', 'spa': 'Spanish', 'fre': 'French',
+         'ger': 'German', 'hin': 'Hindi', 'jpn': 'Japanese',
+         'kor': 'Korean', 'chi': 'Chinese', 'ara': 'Arabic',
+         'rus': 'Russian', 'ita': 'Italian', 'por': 'Portuguese',
+        }[l.toLowerCase()] ?? l.toUpperCase();
   }
 
   IconData _qualityIcon(String q) {
+    if (q.contains('4K') || q.contains('2160')) return Icons.four_k_rounded;
     if (q.contains('1080')) return Icons.hd_rounded;
     if (q.contains('720')) return Icons.hd_outlined;
-    if (q.contains('480')) return Icons.sd_rounded;
-    return Icons.play_circle_outline;
+    return Icons.sd_rounded;
+  }
+
+  Future<void> _searchOpenSubtitles() async {
+    if (widget.imdbId.isEmpty) {
+      setState(() => _subError = 'No IMDB ID — cannot search OpenSubtitles.');
+      return;
+    }
+    setState(() { _subLoading = true; _subError = null; _osResults = []; });
+    try {
+      final svc = opensubs.SubtitleService();
+      final tracks = await svc.search(
+        imdbId: widget.imdbId,
+        language: _subLang,
+        season: widget.mediaType == 'tv' ? widget.season : 0,
+        episode: widget.mediaType == 'tv' ? widget.episode : 0,
+      );
+      final infos = <SubtitleInfo>[];
+      for (final t in tracks) {
+        final url = await svc.getDownloadUrl(t.fileId);
+        if (url != null) {
+          infos.add(SubtitleInfo(
+            url: url,
+            lang: t.languageCode,
+            label: '${_fmtLang(t.languageCode)} · ${t.releaseName.length > 30 ? '${t.releaseName.substring(0, 30)}…' : t.releaseName}',
+          ));
+        }
+      }
+      setState(() { _osResults = infos; _subLoading = false; });
+    } catch (e) {
+      setState(() { _subError = 'Search failed: $e'; _subLoading = false; });
+    }
   }
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     final audioTracks = widget.player.state.tracks.audio;
-    final embSubTracks = widget.player.state.tracks.subtitle;
-    final extSubTracks = widget.stream?.subtitles ?? [];
+    final embSubs = widget.player.state.tracks.subtitle;
+    final extSubs = widget.stream?.subtitles ?? [];
     final qualities = widget.stream?.qualities ?? [];
 
-    final hasAudio = audioTracks.length > 1; // Only show if more than 1 track (or even if 1 to be safe)
-    final hasQualities = qualities.isNotEmpty;
-    final hasSubs = embSubTracks.isNotEmpty || extSubTracks.isNotEmpty;
+    final tabs = <String>[];
+    if (qualities.isNotEmpty) tabs.add('Quality');
+    if (audioTracks.length > 1) tabs.add('Audio');
+    tabs.add('Subtitles'); // always show — OpenSubtitles fallback
 
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Center(
-            child: Container(
-              width: 40, height: 4,
-              decoration: BoxDecoration(color: Colors.white24, borderRadius: BorderRadius.circular(2)),
+    // Clamp tab index
+    final safeTab = _tabIndex.clamp(0, tabs.length - 1);
+
+    return SafeArea(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // ── Drag handle ──
+            Container(
+              width: 36, height: 4,
+              decoration: BoxDecoration(
+                color: cs.onSurfaceVariant.withValues(alpha: 0.4),
+                borderRadius: BorderRadius.circular(2),
+              ),
             ),
-          ),
-          const SizedBox(height: 16),
-          // Tabs
-          SingleChildScrollView(
-            scrollDirection: Axis.horizontal,
-            child: Row(
+            const SizedBox(height: 16),
+
+            // ── M3 Tab bar ──
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              child: Row(
+                children: List.generate(tabs.length, (i) {
+                  final active = safeTab == i;
+                  return Padding(
+                    padding: const EdgeInsets.only(right: 8),
+                    child: FilterChip(
+                      label: Text(tabs[i]),
+                      selected: active,
+                      onSelected: (_) => setState(() => _tabIndex = i),
+                      showCheckmark: false,
+                      selectedColor: cs.primaryContainer,
+                      labelStyle: TextStyle(
+                        color: active ? cs.onPrimaryContainer : Colors.white70,
+                        fontWeight: active ? FontWeight.w700 : FontWeight.w400,
+                      ),
+                      backgroundColor: Colors.white10,
+                      side: BorderSide.none,
+                      shape: const StadiumBorder(),
+                    ),
+                  );
+                }),
+              ),
+            ),
+            const SizedBox(height: 12),
+
+            // ── Content ──
+            ConstrainedBox(
+              constraints: BoxConstraints(
+                maxHeight: MediaQuery.of(context).size.height * 0.45,
+              ),
+              child: SingleChildScrollView(
+                child: _buildTab(tabs[safeTab], qualities, audioTracks, embSubs, extSubs, cs),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTab(
+    String tab,
+    List<QualityOption> qualities,
+    List<AudioTrack> audioTracks,
+    List<SubtitleTrack> embSubs,
+    List<SubtitleInfo> extSubs,
+    ColorScheme cs,
+  ) {
+    switch (tab) {
+      // ── Quality ──────────────────────────────────────────────────────────
+      case 'Quality':
+        return Column(
+          children: qualities.map((q) {
+            final active = q.quality == widget.activeQuality;
+            return _SettingsTile(
+              icon: _qualityIcon(q.quality),
+              title: q.quality,
+              active: active,
+              cs: cs,
+              onTap: () => widget.onQualitySelect(q),
+            );
+          }).toList(),
+        );
+
+      // ── Audio ────────────────────────────────────────────────────────────
+      case 'Audio':
+        return Column(
+          children: audioTracks.map((t) {
+            final active = widget.player.state.track.audio == t;
+            return _SettingsTile(
+              icon: Icons.audiotrack_rounded,
+              title: _fmtLang(t.language ?? t.title),
+              active: active,
+              cs: cs,
+              onTap: () => widget.onAudioSelect(t),
+            );
+          }).toList(),
+        );
+
+      // ── Subtitles ────────────────────────────────────────────────────────
+      default:
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // Off tile
+            _SettingsTile(
+              icon: Icons.subtitles_off_rounded,
+              title: 'Off',
+              active: widget.activeSubtitle == -1 || widget.activeSubtitle == null,
+              cs: cs,
+              onTap: () => widget.onSubtitleSelect(-1),
+            ),
+
+            // Embedded subtitles
+            if (embSubs.where((t) => t.id != 'no').isNotEmpty) ...[
+              _sectionLabel('Embedded', cs),
+              ...embSubs.where((t) => t.id != 'no').map((t) => _SettingsTile(
+                icon: Icons.subtitles_outlined,
+                title: _fmtLang(t.language ?? t.title),
+                active: widget.activeSubtitle == t,
+                cs: cs,
+                onTap: () => widget.onSubtitleSelect(t),
+              )),
+            ],
+
+            // Stream-bundled external subtitles
+            if (extSubs.isNotEmpty) ...[
+              _sectionLabel('Bundled', cs),
+              ...List.generate(extSubs.length, (i) => _SettingsTile(
+                icon: Icons.subtitles_rounded,
+                title: extSubs[i].label.isNotEmpty ? extSubs[i].label : _fmtLang(extSubs[i].lang),
+                active: widget.activeSubtitle == i,
+                cs: cs,
+                onTap: () => widget.onSubtitleSelect(i),
+              )),
+            ],
+
+            // OpenSubtitles search
+            _sectionLabel('OpenSubtitles Search', cs),
+            Row(
               children: [
-                if (hasQualities) _TabButton(
-                  title: 'Quality',
-                  isActive: _activeTab == 'Quality',
-                  onTap: () => setState(() => _activeTab = 'Quality'),
+                Expanded(
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: Colors.white10,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(color: cs.outline.withValues(alpha: 0.2)),
+                    ),
+                    child: DropdownButton<String>(
+                      value: _subLang,
+                      isExpanded: true,
+                      underline: const SizedBox.shrink(),
+                      dropdownColor: const Color(0xFF1E1E2E),
+                      style: const TextStyle(color: Colors.white, fontSize: 13),
+                      icon: const Icon(Icons.expand_more_rounded, color: Colors.white54, size: 18),
+                      items: _langNames.entries.map((e) => DropdownMenuItem(
+                        value: e.key,
+                        child: Text(e.value),
+                      )).toList(),
+                      onChanged: (v) { if (v != null) setState(() => _subLang = v); },
+                    ),
+                  ),
                 ),
-                if (hasAudio) _TabButton(
-                  title: 'Audio',
-                  isActive: _activeTab == 'Audio',
-                  onTap: () => setState(() => _activeTab = 'Audio'),
-                ),
-                if (hasSubs) _TabButton(
-                  title: 'Subtitles',
-                  isActive: _activeTab == 'Subtitles',
-                  onTap: () => setState(() => _activeTab = 'Subtitles'),
+                const SizedBox(width: 8),
+                FilledButton.icon(
+                  onPressed: _subLoading ? null : _searchOpenSubtitles,
+                  icon: _subLoading
+                      ? const SizedBox(width: 16, height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                      : const Icon(Icons.search_rounded, size: 18),
+                  label: const Text('Search'),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: cs.primary,
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                  ),
                 ),
               ],
             ),
-          ),
-          const SizedBox(height: 16),
-          // Content
-          ConstrainedBox(
-            constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.5),
-            child: SingleChildScrollView(
-              child: _buildContent(qualities, audioTracks, embSubTracks, extSubTracks),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildContent(
-    List<QualityOption> qualities,
-    List<AudioTrack> audioTracks,
-    List<SubtitleTrack> embSubTracks,
-    List<SubtitleInfo> extSubTracks,
-  ) {
-    if (_activeTab == 'Quality') {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: qualities.map((q) {
-          final isActive = q.quality == widget.activeQuality;
-          return _ListTile(
-            icon: _qualityIcon(q.quality),
-            title: q.quality,
-            isActive: isActive,
-            onTap: () => widget.onQualitySelect(q),
-          );
-        }).toList(),
-      );
-    } else if (_activeTab == 'Audio') {
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: audioTracks.map((t) {
-          final isActive = widget.player.state.track.audio == t;
-          final title = t.language ?? t.title ?? 'Audio Track ${t.id}';
-          return _ListTile(
-            icon: Icons.audiotrack_rounded,
-            title: _formatLang(title),
-            isActive: isActive,
-            onTap: () => widget.onAudioSelect(t),
-          );
-        }).toList(),
-      );
-    } else {
-      // Subtitles
-      return Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          _ListTile(
-            icon: Icons.cancel_outlined,
-            title: 'Off',
-            isActive: widget.activeSubtitle == -1 || widget.activeSubtitle == SubtitleTrack.no() || widget.activeSubtitle == null,
-            onTap: () => widget.onSubtitleSelect(-1),
-          ),
-          if (embSubTracks.isNotEmpty) ...[
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 8),
-              child: Text('Embedded', style: TextStyle(color: Colors.white54, fontSize: 12, fontWeight: FontWeight.bold)),
-            ),
-            ...embSubTracks.where((t) => t.id != 'no').map((t) {
-              final isActive = widget.activeSubtitle == t;
-              final title = t.language ?? t.title ?? 'Subtitle ${t.id}';
-              return _ListTile(
-                icon: Icons.subtitles_outlined,
-                title: _formatLang(title),
-                isActive: isActive,
-                onTap: () => widget.onSubtitleSelect(t),
-              );
-            }),
+            if (_subError != null)
+              Padding(
+                padding: const EdgeInsets.only(top: 8),
+                child: Text(_subError!, style: TextStyle(color: cs.error, fontSize: 12)),
+              ),
+            if (_osResults.isNotEmpty) ...[
+              const SizedBox(height: 8),
+              ..._osResults.asMap().entries.map((e) => _SettingsTile(
+                icon: Icons.subtitles_rounded,
+                title: e.value.label.isNotEmpty ? e.value.label : _fmtLang(e.value.lang),
+                active: false,
+                cs: cs,
+                onTap: () {
+                  // Inject into stream externally via callback
+                  widget.onSubtitleSelect(e.value);
+                },
+              )),
+            ],
+            const SizedBox(height: 8),
           ],
-          if (extSubTracks.isNotEmpty) ...[
-            const Padding(
-              padding: EdgeInsets.symmetric(vertical: 8),
-              child: Text('External', style: TextStyle(color: Colors.white54, fontSize: 12, fontWeight: FontWeight.bold)),
-            ),
-            ...List.generate(extSubTracks.length, (i) {
-              final sub = extSubTracks[i];
-              final isActive = widget.activeSubtitle == i;
-              return _ListTile(
-                icon: Icons.subtitles_outlined,
-                title: sub.label.isNotEmpty ? sub.label : _formatLang(sub.lang),
-                isActive: isActive,
-                onTap: () => widget.onSubtitleSelect(i),
-              );
-            }),
-          ],
-        ],
-      );
+        );
     }
   }
+
+  Widget _sectionLabel(String text, ColorScheme cs) => Padding(
+    padding: const EdgeInsets.fromLTRB(0, 12, 0, 4),
+    child: Text(text,
+      style: TextStyle(
+        color: cs.primary,
+        fontSize: 11,
+        fontWeight: FontWeight.w700,
+        letterSpacing: 0.8,
+      )),
+  );
+
+
 }
 
-class _TabButton extends StatelessWidget {
-  final String title;
-  final bool isActive;
-  final VoidCallback onTap;
-  const _TabButton({required this.title, required this.isActive, required this.onTap});
+// ─── M3 Settings Tile ─────────────────────────────────────────────────────────
 
-  @override
-  Widget build(BuildContext context) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        margin: const EdgeInsets.only(right: 8),
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        decoration: BoxDecoration(
-          color: isActive ? Colors.deepPurpleAccent : Colors.white12,
-          borderRadius: BorderRadius.circular(20),
-        ),
-        child: Text(title, style: TextStyle(
-          color: isActive ? Colors.white : Colors.white70,
-          fontWeight: FontWeight.w600,
-        )),
-      ),
-    );
-  }
-}
-
-class _ListTile extends StatelessWidget {
+class _SettingsTile extends StatelessWidget {
   final IconData icon;
   final String title;
-  final bool isActive;
+  final bool active;
+  final ColorScheme cs;
   final VoidCallback onTap;
-  const _ListTile({required this.icon, required this.title, required this.isActive, required this.onTap});
+
+  const _SettingsTile({
+    required this.icon,
+    required this.title,
+    required this.active,
+    required this.cs,
+    required this.onTap,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return ListTile(
-      dense: true,
-      contentPadding: EdgeInsets.zero,
-      leading: Icon(
-        isActive ? Icons.check_circle : icon,
-        color: isActive ? Colors.deepPurpleAccent : Colors.white54,
-        size: 22,
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 200),
+      margin: const EdgeInsets.symmetric(vertical: 2),
+      decoration: BoxDecoration(
+        color: active
+            ? cs.primaryContainer.withValues(alpha: 0.3)
+            : Colors.transparent,
+        borderRadius: BorderRadius.circular(12),
+        border: active
+            ? Border.all(color: cs.primary.withValues(alpha: 0.4), width: 1)
+            : null,
       ),
-      title: Text(title, style: TextStyle(
-        color: isActive ? Colors.deepPurpleAccent : Colors.white,
-        fontWeight: isActive ? FontWeight.w700 : FontWeight.w400,
-        fontSize: 15,
-      )),
-      onTap: onTap,
+      child: ListTile(
+        dense: true,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        leading: Icon(
+          active ? Icons.check_circle_rounded : icon,
+          color: active ? cs.primary : Colors.white54,
+          size: 22,
+        ),
+        title: Text(title,
+          style: TextStyle(
+            color: active ? cs.primary : Colors.white,
+            fontWeight: active ? FontWeight.w700 : FontWeight.w400,
+            fontSize: 14,
+          )),
+
+        trailing: active
+            ? Icon(Icons.radio_button_checked_rounded, color: cs.primary, size: 18)
+            : const Icon(Icons.radio_button_unchecked_rounded, color: Colors.white24, size: 18),
+        onTap: onTap,
+      ),
     );
   }
 }
