@@ -200,6 +200,145 @@ class DownloadService extends ChangeNotifier {
     _requeue(task);
   }
 
+  /// Download from an HTTP stream URL (MP4 direct download).
+  /// For HLS (.m3u8), we download the master playlist and pick the best quality segment list.
+  Future<DownloadTask> startStreamDownload({
+    required int tmdbId,
+    required String imdbId,
+    required String title,
+    required String mediaType,
+    required String streamUrl,
+    required String quality,
+    Map<String, String> headers = const {},
+    int? season,
+    int? episode,
+    String? episodeName,
+    String? posterPath,
+  }) async {
+    // Wi-Fi check
+    if (_wifiOnly) {
+      final conn = await Connectivity().checkConnectivity();
+      if (!conn.contains(ConnectivityResult.wifi)) {
+        final task = DownloadTask(
+          id: _buildId(tmdbId, season, episode, 'stream_$quality'),
+          tmdbId: tmdbId, imdbId: imdbId, title: title, mediaType: mediaType,
+          season: season, episode: episode, episodeName: episodeName,
+          quality: quality, posterPath: posterPath, source: 'stream',
+          createdAt: DateTime.now(), status: DownloadStatus.failed,
+          error: 'Wi-Fi Only mode is on.',
+        );
+        await _box.put(task.id, task);
+        _scheduleNotify();
+        return task;
+      }
+    }
+
+    final id = _buildId(tmdbId, season, episode, 'stream_$quality');
+    if (_box.containsKey(id)) {
+      final existing = _box.get(id)!;
+      if (existing.status != DownloadStatus.failed) return existing;
+      await existing.delete();
+    }
+
+    final task = DownloadTask(
+      id: id,
+      tmdbId: tmdbId, imdbId: imdbId, title: title, mediaType: mediaType,
+      season: season, episode: episode, episodeName: episodeName,
+      quality: quality, posterPath: posterPath, source: 'stream',
+      createdAt: DateTime.now(), status: DownloadStatus.downloading,
+    );
+    await _box.put(id, task);
+    _scheduleNotify();
+
+    // Run download in background
+    _processHttpDownload(task, streamUrl, headers);
+    return task;
+  }
+
+  /// HTTP download processor — handles MP4 direct downloads with progress.
+  Future<void> _processHttpDownload(
+    DownloadTask task, String url, Map<String, String> headers,
+  ) async {
+    try {
+      final client = HttpClient();
+      final request = await client.getUrl(Uri.parse(url));
+      headers.forEach((k, v) => request.headers.set(k, v));
+
+      final response = await request.close();
+      if (response.statusCode != 200 && response.statusCode != 206) {
+        await _failTask(task, 'HTTP ${response.statusCode}');
+        client.close();
+        return;
+      }
+
+      final totalBytes = response.contentLength;
+      if (totalBytes > 0) {
+        task.fileSizeBytes = totalBytes;
+      }
+
+      // Build filename
+      final safeTitle = task.title.replaceAll(RegExp(r'[^\w\s-]'), '').replaceAll(' ', '_');
+      final ext = url.contains('.mkv') ? 'mkv' : 'mp4';
+      final seasonTag = task.season != null ? '_S${task.season}E${task.episode}' : '';
+      final dir = await _getDownloadDir();
+      final filePath = '${dir.path}/$safeTitle${seasonTag}_${task.quality}.$ext';
+
+      final file = File(filePath);
+      final sink = file.openWrite();
+
+      int received = 0;
+      DateTime lastSpeedCheck = DateTime.now();
+      int lastBytes = 0;
+
+      await for (final chunk in response) {
+        if (task.status == DownloadStatus.paused) {
+          sink.close();
+          client.close();
+          return;
+        }
+
+        sink.add(chunk);
+        received += chunk.length;
+
+        // Calculate speed every 500ms
+        final now = DateTime.now();
+        final dt = now.difference(lastSpeedCheck).inMilliseconds;
+        if (dt > 500) {
+          final db = received - lastBytes;
+          task.downloadSpeed = db / (dt / 1000.0);
+          lastBytes = received;
+          lastSpeedCheck = now;
+        }
+
+        task.downloadedBytes = received;
+        task.progress = totalBytes > 0 ? received / totalBytes : 0;
+        task.save();
+        _scheduleNotify();
+      }
+
+      await sink.close();
+      client.close();
+
+      task.status = DownloadStatus.completed;
+      task.filePath = filePath;
+      task.progress = 1.0;
+      task.downloadSpeed = 0;
+      await task.save();
+      _scheduleNotify();
+      _processNextQueued();
+
+      debugPrint('[DownloadService] Stream download complete: $filePath');
+    } catch (e) {
+      await _failTask(task, 'Stream download failed: $e');
+    }
+  }
+
+  Future<Directory> _getDownloadDir() async {
+    final dir = Directory('/storage/emulated/0/Download');
+    if (!await dir.exists()) await dir.create(recursive: true);
+    return dir;
+  }
+
   Future<void> pauseTask(String id) async {
     final task = _box.get(id);
     if (task == null) return;

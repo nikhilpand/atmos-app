@@ -148,6 +148,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                   child: _HeroBanner(
                     key: ValueKey(_heroIndex),
                     media: hero,
+                    scrollController: _scroll,
                     onPlay: () => _go(hero),
                     onChangeHero: () {
                       _heroTimer?.cancel();
@@ -454,7 +455,8 @@ class _HeroBanner extends StatelessWidget {
   final TmdbMedia media;
   final VoidCallback onPlay;
   final VoidCallback onChangeHero;
-  const _HeroBanner({super.key, required this.media, required this.onPlay, required this.onChangeHero});
+  final ScrollController? scrollController;
+  const _HeroBanner({super.key, required this.media, required this.onPlay, required this.onChangeHero, this.scrollController});
 
   @override
   Widget build(BuildContext context) {
@@ -463,12 +465,30 @@ class _HeroBanner extends StatelessWidget {
     final screenW = MediaQuery.sizeOf(context).width;
     final cacheW = (screenW * MediaQuery.of(context).devicePixelRatio).toInt();
 
+    // Parallax: image moves at 0.5x scroll speed
+    Widget buildImage() {
+      return AnimatedBuilder(
+        animation: scrollController ?? ScrollController(),
+        builder: (_, child) {
+          final offset = scrollController?.hasClients == true
+              ? scrollController!.offset * 0.3
+              : 0.0;
+          return Transform.translate(
+            offset: Offset(0, offset),
+            child: child,
+          );
+        },
+        child: CachedNetworkImage(imageUrl: media.backdropUrl, fit: BoxFit.cover, memCacheWidth: cacheW),
+      );
+    }
+
     return SizedBox(
       height: h,
-      child: Stack(
-        fit: StackFit.expand,
-        children: [
-          CachedNetworkImage(imageUrl: media.backdropUrl, fit: BoxFit.cover, memCacheWidth: cacheW),
+      child: ClipRect(
+        child: Stack(
+          fit: StackFit.expand,
+          children: [
+            buildImage(),
           DecoratedBox(
             decoration: BoxDecoration(
               gradient: LinearGradient(
@@ -557,7 +577,8 @@ class _HeroBanner extends StatelessWidget {
               ],
             ),
           ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -568,6 +589,19 @@ class _HeroBanner extends StatelessWidget {
 class _ContinueWatchingRow extends StatelessWidget {
   final List<WatchHistory> items;
   const _ContinueWatchingRow({required this.items});
+
+  void _playNow(BuildContext context, WatchHistory h) {
+    context.push('/player', extra: {
+      'title': h.title,
+      'type': h.mediaType,
+      'imdbId': h.imdbId,
+      'tmdbId': h.tmdbId,
+      'season': h.season ?? 1,
+      'episode': h.episode ?? 1,
+      'posterPath': h.posterPath,
+      // Player will read HistoryService for resumeFrom automatically
+    });
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -591,47 +625,68 @@ class _ContinueWatchingRow extends StatelessWidget {
               final h = items[i];
               return Padding(
                 padding: const EdgeInsets.only(right: AppSpacing.md),
-                child: Focus(
-                  child: GestureDetector(
-                    onTap: () { if (h.tmdbId > 0) context.push('/details/${h.mediaType}/${h.tmdbId}'); },
-                    child: SizedBox(
-                      width: context.isExpanded ? 300 : 220,
-                      child: ClipRRect(
-                        borderRadius: AppRadius.mdAll,
-                        child: Stack(
-                          fit: StackFit.expand,
-                          children: [
-                            CachedNetworkImage(
-                              imageUrl: h.posterPath.startsWith('http')
-                                  ? h.posterPath
-                                  : 'https://image.tmdb.org/t/p/w342${h.posterPath}',
-                              fit: BoxFit.cover, memCacheWidth: 300,
-                            ),
-                            Container(color: Colors.black.withValues(alpha: 0.5)),
-                            Positioned(
-                              bottom: 0, left: 0, right: 0,
-                              child: Padding(
-                                padding: const EdgeInsets.all(AppSpacing.sm),
-                                child: Column(
-                                  crossAxisAlignment: CrossAxisAlignment.start,
-                                  children: [
-                                    Text(h.title, maxLines: 1, overflow: TextOverflow.ellipsis,
-                                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.white)),
-                                    if (h.displaySubtitle.isNotEmpty)
-                                      Text(h.displaySubtitle, style: const TextStyle(fontSize: 11, color: Colors.white70)),
-                                    const SizedBox(height: AppSpacing.xs),
-                                    LinearProgressIndicator(
-                                      value: h.progressPercent,
-                                      backgroundColor: Colors.white.withValues(alpha: 0.2),
-                                      valueColor: AlwaysStoppedAnimation<Color>(cs.primary),
-                                      minHeight: 3,
+                child: GestureDetector(
+                  // Tap card → details page
+                  onTap: () { if (h.tmdbId > 0) context.push('/details/${h.mediaType}/${h.tmdbId}'); },
+                  child: SizedBox(
+                    width: context.isExpanded ? 300 : 220,
+                    child: ClipRRect(
+                      borderRadius: AppRadius.mdAll,
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          CachedNetworkImage(
+                            imageUrl: h.posterPath.startsWith('http')
+                                ? h.posterPath
+                                : 'https://image.tmdb.org/t/p/w342${h.posterPath}',
+                            fit: BoxFit.cover, memCacheWidth: 300,
+                          ),
+                          Container(color: Colors.black.withValues(alpha: 0.45)),
+                          // ── ▶ Play button (centre) ──────────────────────────
+                          Center(
+                            child: GestureDetector(
+                              onTap: () => _playNow(context, h),
+                              child: Container(
+                                width: 44, height: 44,
+                                decoration: BoxDecoration(
+                                  shape: BoxShape.circle,
+                                  color: cs.primary.withValues(alpha: 0.85),
+                                  boxShadow: [
+                                    BoxShadow(
+                                      color: cs.primary.withValues(alpha: 0.4),
+                                      blurRadius: 16,
+                                      spreadRadius: 2,
                                     ),
                                   ],
                                 ),
+                                child: const Icon(Icons.play_arrow_rounded, color: Colors.white, size: 26),
                               ),
                             ),
-                          ],
-                        ),
+                          ),
+                          // ── Bottom meta + progress bar ──────────────────────
+                          Positioned(
+                            bottom: 0, left: 0, right: 0,
+                            child: Padding(
+                              padding: const EdgeInsets.all(AppSpacing.sm),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(h.title, maxLines: 1, overflow: TextOverflow.ellipsis,
+                                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.white)),
+                                  if (h.displaySubtitle.isNotEmpty)
+                                    Text(h.displaySubtitle, style: const TextStyle(fontSize: 11, color: Colors.white70)),
+                                  const SizedBox(height: AppSpacing.xs),
+                                  LinearProgressIndicator(
+                                    value: h.progressPercent,
+                                    backgroundColor: Colors.white.withValues(alpha: 0.2),
+                                    valueColor: AlwaysStoppedAnimation<Color>(cs.primary),
+                                    minHeight: 3,
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ),
                   ),

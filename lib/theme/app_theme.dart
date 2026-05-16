@@ -248,9 +248,9 @@ class AtmosTheme {
       ),
 
       // Interactions
-      splashColor: scheme.primary.withAlpha(26),
-      highlightColor: scheme.primary.withAlpha(20),
-      focusColor: scheme.primary.withAlpha(38),
+      splashColor: scheme.primary.withValues(alpha: 0.1),
+      highlightColor: scheme.primary.withValues(alpha: 0.08),
+      focusColor: scheme.primary.withValues(alpha: 0.15),
       splashFactory: InkSparkle.splashFactory,
 
       // M3 Expressive page transitions
@@ -278,4 +278,41 @@ class AtmosTheme {
     colors: [Colors.transparent, scheme.surface.withAlpha(128), scheme.surface],
     stops: const [0.0, 0.5, 1.0],
   );
+
+  // ── Glassmorphism helpers ──────────────────────────────────────────────────
+  /// Frosted glass decoration for bottom sheets, cards, dialogs
+  static BoxDecoration frostedGlass({
+    double opacity = 0.12,
+    double borderRadius = 20,
+    Color? tint,
+  }) =>
+      BoxDecoration(
+        color: (tint ?? Colors.white).withValues(alpha: opacity),
+        borderRadius: BorderRadius.circular(borderRadius),
+        border: Border.all(
+          color: Colors.white.withValues(alpha: 0.08),
+          width: 0.5,
+        ),
+      );
+
+  /// Shimmer gradient for skeleton loading states
+  static LinearGradient shimmerGradient(double animValue) => LinearGradient(
+    begin: Alignment(-1.0 + 2.0 * animValue, 0),
+    end: Alignment(1.0 + 2.0 * animValue, 0),
+    colors: const [
+      Color(0xFF1A1A2E),
+      Color(0xFF252540),
+      Color(0xFF1A1A2E),
+    ],
+  );
+
+  // ── Spring animation curves ────────────────────────────────────────────────
+  /// Bouncy spring for card press/release — 0.3s, 300 stiffness
+  static const springBouncy = ElasticOutCurve(0.6);
+
+  /// Gentle spring for page transitions and control overlays
+  static const springGentle = Curves.easeOutCubic;
+
+  /// Snappy spring for micro-interactions (pills, toggles)
+  static const springSnappy = Curves.easeOutBack;
 }

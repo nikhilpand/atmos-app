@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// A single subtitle track from a provider
 class SubtitleInfo {
@@ -54,12 +55,185 @@ class ExtractedStream {
   String toString() => 'ExtractedStream($providerName → $url, ${subtitles.length} subs, ${qualities.length} qualities)';
 }
 
+/// Provider status for UI feedback
+enum ProviderStatus { idle, trying, success, failed }
+
+/// Callback for provider status updates — drives the UI pill animations
+typedef ProviderStatusCallback = void Function(String providerName, ProviderStatus status);
+
 // ─── Stream Extractor Service ─────────────────────────────────────────────────
 
 class StreamExtractorService {
   static const _ua = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
-  // ── Primary entry: tries API extractors first, then WebView ──
+  /// All available provider keys for server selection UI
+  static const availableProviders = ['VidAPI', 'AutoEmbed', 'Videasy', 'VidSrc', '2Embed'];
+
+  /// Track last successful provider per content for smarter ordering.
+  /// Persisted to SharedPreferences across app restarts.
+  final _lastSuccessful = <String, String>{};
+  static const _prefKey = 'extractor_last_successful';
+
+  StreamExtractorService() {
+    _loadPersistedSuccesses();
+  }
+
+  Future<void> _loadPersistedSuccesses() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString(_prefKey);
+      if (raw != null) {
+        final map = jsonDecode(raw) as Map<String, dynamic>;
+        _lastSuccessful.addAll(map.cast<String, String>());
+        debugPrint('[Extractor] Loaded ${_lastSuccessful.length} persisted provider preferences');
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _persistSuccess(String contentKey, String provider) async {
+    _lastSuccessful[contentKey] = provider;
+    // Keep map bounded to 50 entries (LRU-style: drop oldest)
+    if (_lastSuccessful.length > 50) {
+      _lastSuccessful.remove(_lastSuccessful.keys.first);
+    }
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_prefKey, jsonEncode(_lastSuccessful));
+    } catch (_) {}
+  }
+
+  // ── Primary entry: PARALLEL RACE with status reporting ──
+
+  /// Extract stream by racing ALL providers in parallel.
+  /// First successful result wins. Calls [onStatus] for live UI feedback.
+  /// If [preferredProvider] is set, it gets a head start (fires first).
+  Future<ExtractedStream?> extractWithStatus({
+    required String imdbId,
+    required String tmdbId,
+    required String type,
+    String title = '',
+    int season = 1,
+    int episode = 1,
+    ProviderStatusCallback? onStatus,
+    String? preferredProvider,
+  }) async {
+    if ((tmdbId.isEmpty || tmdbId == '0') && imdbId.isEmpty) return null;
+
+    final contentKey = '${imdbId}_${tmdbId}_${type}_${season}_$episode';
+    final providers = _buildProviderOrder(contentKey, preferredProvider);
+
+    // Mark all as trying
+    for (final p in providers) {
+      onStatus?.call(p, ProviderStatus.trying);
+    }
+
+    // Fire all providers in parallel
+    final completer = Completer<ExtractedStream?>();
+    int remaining = providers.length;
+    bool resolved = false;
+
+    for (final provider in providers) {
+      _extractSingle(
+        provider: provider,
+        imdbId: imdbId, tmdbId: tmdbId, type: type,
+        title: title, season: season, episode: episode,
+      ).then((result) {
+        if (resolved) return;
+        if (result != null) {
+          resolved = true;
+          onStatus?.call(provider, ProviderStatus.success);
+          // Mark others as idle (race over)
+          for (final p in providers) {
+            if (p != provider) onStatus?.call(p, ProviderStatus.idle);
+          }
+          _persistSuccess(contentKey, provider);
+          if (!completer.isCompleted) completer.complete(result);
+        } else {
+          onStatus?.call(provider, ProviderStatus.failed);
+          remaining--;
+          if (remaining <= 0 && !completer.isCompleted) {
+            completer.complete(null);
+          }
+        }
+      }).catchError((e) {
+        if (resolved) return;
+        debugPrint('[Extractor] $provider threw: $e');
+        onStatus?.call(provider, ProviderStatus.failed);
+        remaining--;
+        if (remaining <= 0 && !completer.isCompleted) {
+          completer.complete(null);
+        }
+      });
+    }
+
+    // Global timeout — if nothing responds in 12s, give up
+    return completer.future.timeout(
+      const Duration(seconds: 12),
+      onTimeout: () {
+        resolved = true;
+        debugPrint('[Extractor] Global timeout — no provider responded');
+        return null;
+      },
+    );
+  }
+
+  /// Single provider extraction (called in parallel)
+  Future<ExtractedStream?> _extractSingle({
+    required String provider,
+    required String imdbId,
+    required String tmdbId,
+    required String type,
+    String title = '',
+    int season = 1,
+    int episode = 1,
+  }) async {
+    switch (provider) {
+      case 'VidAPI':
+        return extractVidAPIDirect(imdbId: imdbId, tmdbId: tmdbId, type: type, season: season, episode: episode);
+      case 'Videasy':
+        return extractVideasyDirect(tmdbId: tmdbId, title: title, type: type, imdbId: imdbId, season: season, episode: episode);
+      case 'AutoEmbed':
+        return extractAutoEmbedDirect(tmdbId: tmdbId, type: type, season: season, episode: episode);
+      case 'VidSrc':
+        return extractVidSrcDirect(imdbId: imdbId, tmdbId: tmdbId, type: type, season: season, episode: episode);
+      case '2Embed':
+        return extract2EmbedDirect(tmdbId: tmdbId, type: type, season: season, episode: episode);
+      default:
+        return null;
+    }
+  }
+
+  /// Try a specific provider by name (for "Try Another Source" button)
+  Future<ExtractedStream?> extractFromProvider({
+    required String providerName,
+    required String imdbId,
+    required String tmdbId,
+    required String type,
+    String title = '',
+    int season = 1,
+    int episode = 1,
+  }) async {
+    return _extractSingle(
+      provider: providerName,
+      imdbId: imdbId, tmdbId: tmdbId, type: type,
+      title: title, season: season, episode: episode,
+    );
+  }
+
+  List<String> _buildProviderOrder(String contentKey, String? preferred) {
+    if (preferred != null && availableProviders.contains(preferred)) {
+      // User explicitly chose — put it first, others after
+      return [preferred, ...availableProviders.where((p) => p != preferred)];
+    }
+    final last = _lastSuccessful[contentKey];
+    if (last != null) {
+      return [last, ...availableProviders.where((p) => p != last)];
+    }
+    // Default: VidAPI first (fastest)
+    return List.from(availableProviders);
+  }
+
+  // ── Worker API ──
 
   Future<ExtractedStream?> extractViaWorker({
     required String imdbId,
@@ -90,19 +264,8 @@ class StreamExtractorService {
     return null;
   }
 
-  // ── Direct API extraction (no WebView needed) ──
+  // ── Videasy: tighter timeouts, smarter server fallback ──
 
-  /// Videasy: fetch encrypted stream data from api.videasy.net,
-  /// decrypt via enc-dec.app, return best quality m3u8 URL.
-  ///
-  /// Cracked flow (from Videasy's webpack chunk, module 1520):
-  /// 1. GET api.videasy.net/{server}/sources-with-title?title=X&mediaType=Y&tmdbId=Z&imdbId=W
-  ///    → returns hex-encoded encrypted blob
-  /// 2. POST enc-dec.app/api/dec-videasy {text: blob, id: tmdbId}
-  ///    → returns {sources: [{url, quality}], subtitles: [...]}
-  /// 3. Pick highest quality stream
-  ///
-  /// Available servers: mb-flix, meine (German), hdmovie, 1movies, m4uhd
   Future<ExtractedStream?> extractVideasyDirect({
     required String tmdbId,
     required String title,
@@ -112,14 +275,13 @@ class StreamExtractorService {
     int season = 1,
     int episode = 1,
   }) async {
-    // All known Videasy server backends, ordered by reliability
-    const servers = ['mb-flix', 'hdmovie', '1movies', 'm4uhd', 'meine'];
+    // Ordered by reliability — mb-flix is most stable
+    const servers = ['mb-flix', 'hdmovie', '1movies', 'm4uhd'];
 
     for (final server in servers) {
       try {
         debugPrint('[Extractor] 🔑 Videasy/$server for tmdb=$tmdbId "$title"');
 
-        // Step 1: Build query params matching Videasy's JS
         final params = {
           'title': title,
           'mediaType': type == 'tv' ? 'tv' : 'movie',
@@ -128,18 +290,17 @@ class StreamExtractorService {
           if (year > 0) 'year': '$year',
           if (type == 'tv') 'seasonId': '$season',
           if (type == 'tv') 'episodeId': '$episode',
-          if (server == 'meine') 'language': 'german',
         };
 
         final uri = Uri.parse('https://api.videasy.net/$server/sources-with-title')
             .replace(queryParameters: params);
 
-        // Step 2: Fetch encrypted stream data
+        // AGGRESSIVE timeout: 5s per server (was 8s)
         final encResp = await http.get(uri, headers: {
           'User-Agent': _ua,
           'Referer': 'https://player.videasy.net/',
           'Origin': 'https://player.videasy.net',
-        }).timeout(const Duration(seconds: 8));
+        }).timeout(const Duration(seconds: 5));
 
         if (encResp.statusCode != 200 || encResp.body.isEmpty) {
           debugPrint('[Extractor] Videasy/$server returned ${encResp.statusCode}');
@@ -147,20 +308,19 @@ class StreamExtractorService {
         }
 
         final encryptedBlob = encResp.body;
-        // Skip if response is JSON error
         if (encryptedBlob.startsWith('{')) {
-          debugPrint('[Extractor] Videasy/$server returned JSON error: ${encryptedBlob.substring(0, 100)}');
+          debugPrint('[Extractor] Videasy/$server returned JSON error');
           continue;
         }
 
         debugPrint('[Extractor] 🔑 Videasy/$server got ${encryptedBlob.length} bytes encrypted');
 
-        // Step 3: Decrypt via enc-dec.app
+        // Decrypt — 6s timeout (was 10s)
         final decResp = await http.post(
           Uri.parse('https://enc-dec.app/api/dec-videasy'),
           headers: {'Content-Type': 'application/json', 'User-Agent': _ua},
           body: jsonEncode({'text': encryptedBlob, 'id': tmdbId}),
-        ).timeout(const Duration(seconds: 10));
+        ).timeout(const Duration(seconds: 6));
 
         if (decResp.statusCode != 200) {
           debugPrint('[Extractor] enc-dec.app returned ${decResp.statusCode}');
@@ -173,7 +333,6 @@ class StreamExtractorService {
           continue;
         }
 
-        // Step 4: Parse decrypted sources
         final result = decData['result'];
         Map<String, dynamic> sourcesMap;
         if (result is String) {
@@ -187,7 +346,6 @@ class StreamExtractorService {
         final sources = sourcesMap['sources'];
         if (sources is! List || sources.isEmpty) continue;
 
-        // Build quality options list
         final qualities = <QualityOption>[];
         for (final s in sources) {
           if (s is! Map) continue;
@@ -196,7 +354,6 @@ class StreamExtractorService {
           if (u.isNotEmpty) qualities.add(QualityOption(quality: q, url: u));
         }
 
-        // Parse subtitles
         final subs = <SubtitleInfo>[];
         final subtitlesRaw = sourcesMap['subtitles'];
         if (subtitlesRaw is List) {
@@ -211,12 +368,11 @@ class StreamExtractorService {
           }
         }
 
-        // Pick best quality (prefer 1080p > 720p > 480p > Auto > any)
         final streamUrl = _pickBestSource(sources);
         if (streamUrl == null) continue;
 
         final quality = _getQualityLabel(sources, streamUrl);
-        debugPrint('[Extractor] ✅ Videasy/$server → $quality, ${subs.length} subs, ${qualities.length} qualities');
+        debugPrint('[Extractor] ✅ Videasy/$server → $quality, ${subs.length} subs');
         return ExtractedStream(
           url: streamUrl,
           headers: {'Referer': 'https://player.videasy.net/', 'User-Agent': _ua},
@@ -231,15 +387,8 @@ class StreamExtractorService {
     return null;
   }
 
-  /// VidAPI: Direct API extraction from streamdata.vaplayer.ru
-  ///
-  /// Cracked flow (from brightpathsignals.com/embed player.min.js):
-  /// 1. GET streamdata.vaplayer.ru/api.php?imdb=X&type=movie (or tmdb=X)
-  ///    → returns {status_code: "200", data: {stream_urls: [url1, url2, ...], title, ...}}
-  /// 2. stream_urls are direct HLS m3u8 links — ZERO encryption
-  /// 3. Multiple quality variants available, first = highest quality
-  ///
-  /// NO server needed — direct HTTP GET, no tokens, no encryption.
+  // ── VidAPI: unchanged (works great per user) ──
+
   Future<ExtractedStream?> extractVidAPIDirect({
     required String imdbId,
     required String tmdbId,
@@ -250,7 +399,6 @@ class StreamExtractorService {
     try {
       debugPrint('[Extractor] 🎯 VidAPI direct for imdb=$imdbId tmdb=$tmdbId');
 
-      // Build API URL — prefer IMDB ID (more reliable), fall back to TMDB
       final params = <String, String>{};
       if (imdbId.isNotEmpty && imdbId.startsWith('tt')) {
         params['imdb'] = imdbId;
@@ -272,7 +420,7 @@ class StreamExtractorService {
         'User-Agent': _ua,
         'Referer': 'https://brightpathsignals.com/',
         'Origin': 'https://brightpathsignals.com',
-      }).timeout(const Duration(seconds: 10));
+      }).timeout(const Duration(seconds: 8));
 
       if (resp.statusCode != 200) {
         debugPrint('[Extractor] VidAPI returned ${resp.statusCode}');
@@ -290,8 +438,6 @@ class StreamExtractorService {
       final streamUrls = streamData['stream_urls'];
 
       if (streamUrls is List && streamUrls.isNotEmpty) {
-        // Build quality options from stream URLs
-        // VidAPI returns 4 URLs: 1080p, 720p, 480p, SD (based on HLS manifest analysis)
         const qualityLabels = ['1080p', '720p', '480p', 'SD'];
         final qualities = <QualityOption>[];
         for (int i = 0; i < streamUrls.length; i++) {
@@ -301,7 +447,6 @@ class StreamExtractorService {
           qualities.add(QualityOption(quality: label, url: u));
         }
 
-        // Parse subtitles from default_subs
         final subs = <SubtitleInfo>[];
         final defaultSubs = data['default_subs'];
         if (defaultSubs is List) {
@@ -309,7 +454,9 @@ class StreamExtractorService {
             if (sub is! Map) continue;
             final subUrl = (sub['url'] ?? sub['file'] ?? '').toString();
             final lang = (sub['lang'] ?? sub['label'] ?? '').toString();
-            if (subUrl.isNotEmpty) subs.add(SubtitleInfo(url: subUrl, lang: lang));
+            if (subUrl.isNotEmpty) {
+              subs.add(SubtitleInfo(url: subUrl, lang: lang));
+            }
           }
         }
 
@@ -331,7 +478,6 @@ class StreamExtractorService {
         }
       }
 
-      // Fallback: check for single 'file' or 'url' field
       final file = streamData['file'] ?? streamData['url'] ?? streamData['stream_url'];
       if (file is String && file.isNotEmpty) {
         return ExtractedStream(
@@ -342,6 +488,179 @@ class StreamExtractorService {
       }
     } catch (e) {
       debugPrint('[Extractor] VidAPI direct failed: $e');
+    }
+    return null;
+  }
+
+  // ── AutoEmbed: fast direct JSON API ──
+
+  Future<ExtractedStream?> extractAutoEmbedDirect({
+    required String tmdbId,
+    required String type,
+    int season = 1,
+    int episode = 1,
+  }) async {
+    try {
+      debugPrint('[Extractor] 🎯 AutoEmbed for tmdb=$tmdbId');
+      final path = type == 'tv'
+          ? '/embed/oplayer.php?id=$tmdbId&s=$season&e=$episode'
+          : '/embed/oplayer.php?id=$tmdbId';
+      final uri = Uri.parse('https://autoembed.cc$path');
+
+      final resp = await http.get(uri, headers: {
+        'User-Agent': _ua,
+        'Referer': 'https://autoembed.cc/',
+      }).timeout(const Duration(seconds: 5));
+
+      if (resp.statusCode != 200) return null;
+
+      // Parse embedded JSON from HTML response
+      final body = resp.body;
+      final srcMatch = RegExp(r'file\s*:\s*"([^"]+)"').firstMatch(body);
+      if (srcMatch == null) {
+        // Try JSON API endpoint
+        final apiPath = type == 'tv'
+            ? '/api/getVideoSource?type=tv&id=$tmdbId&season=$season&episode=$episode'
+            : '/api/getVideoSource?type=movie&id=$tmdbId';
+        final apiResp = await http.get(
+          Uri.parse('https://autoembed.cc$apiPath'),
+          headers: {'User-Agent': _ua},
+        ).timeout(const Duration(seconds: 5));
+
+        if (apiResp.statusCode == 200) {
+          final data = jsonDecode(apiResp.body);
+          final url = (data['videoSource'] ?? data['url'] ?? '').toString();
+          if (url.isNotEmpty) {
+            debugPrint('[Extractor] ✅ AutoEmbed API → $url');
+            return ExtractedStream(
+              url: url,
+              headers: {'Referer': 'https://autoembed.cc/', 'User-Agent': _ua},
+              providerName: 'AutoEmbed',
+            );
+          }
+        }
+        return null;
+      }
+
+      final streamUrl = srcMatch.group(1)!;
+      debugPrint('[Extractor] ✅ AutoEmbed → $streamUrl');
+      return ExtractedStream(
+        url: streamUrl,
+        headers: {'Referer': 'https://autoembed.cc/', 'User-Agent': _ua},
+        providerName: 'AutoEmbed',
+      );
+    } catch (e) {
+      debugPrint('[Extractor] AutoEmbed failed: $e');
+    }
+    return null;
+  }
+
+  // ── VidSrc: popular embed provider ──
+
+  Future<ExtractedStream?> extractVidSrcDirect({
+    required String imdbId,
+    required String tmdbId,
+    required String type,
+    int season = 1,
+    int episode = 1,
+  }) async {
+    try {
+      debugPrint('[Extractor] 🎯 VidSrc for tmdb=$tmdbId');
+      final id = imdbId.isNotEmpty && imdbId.startsWith('tt') ? imdbId : tmdbId;
+      final path = type == 'tv'
+          ? '/embed/tv/$id/$season/$episode'
+          : '/embed/movie/$id';
+
+      // Try multiple VidSrc domains
+      const domains = ['vidsrc.cc', 'vidsrc.xyz', 'vidsrc.in'];
+      for (final domain in domains) {
+        try {
+          final resp = await http.get(
+            Uri.parse('https://$domain$path'),
+            headers: {'User-Agent': _ua},
+          ).timeout(const Duration(seconds: 4));
+
+          if (resp.statusCode != 200) continue;
+
+          // Extract stream URL from response
+          final body = resp.body;
+          final m3u8Match = RegExp(r'(https?://[^\s"<>]+\.m3u8[^\s"<>]*)').firstMatch(body);
+          final mp4Match = RegExp(r'(https?://[^\s"<>]+\.mp4[^\s"<>]*)').firstMatch(body);
+          final streamUrl = m3u8Match?.group(1) ?? mp4Match?.group(1);
+
+          if (streamUrl != null) {
+            debugPrint('[Extractor] ✅ VidSrc/$domain → $streamUrl');
+            return ExtractedStream(
+              url: streamUrl,
+              headers: {'Referer': 'https://$domain/', 'User-Agent': _ua},
+              providerName: 'VidSrc',
+            );
+          }
+        } catch (_) {
+          continue;
+        }
+      }
+    } catch (e) {
+      debugPrint('[Extractor] VidSrc failed: $e');
+    }
+    return null;
+  }
+
+  // ── 2Embed: reliable fallback ──
+
+  Future<ExtractedStream?> extract2EmbedDirect({
+    required String tmdbId,
+    required String type,
+    int season = 1,
+    int episode = 1,
+  }) async {
+    try {
+      debugPrint('[Extractor] 🎯 2Embed for tmdb=$tmdbId');
+      final path = type == 'tv'
+          ? '/scrape?id=$tmdbId&s=$season&e=$episode'
+          : '/scrape?id=$tmdbId';
+
+      const domains = ['2embed.skin', '2embed.cc'];
+      for (final domain in domains) {
+        try {
+          final resp = await http.get(
+            Uri.parse('https://www.$domain$path'),
+            headers: {'User-Agent': _ua, 'Referer': 'https://www.$domain/'},
+          ).timeout(const Duration(seconds: 5));
+
+          if (resp.statusCode != 200) continue;
+
+          final body = resp.body;
+          // Try JSON parse first
+          try {
+            final data = jsonDecode(body);
+            final url = (data['stream'] ?? data['url'] ?? data['file'] ?? '').toString();
+            if (url.isNotEmpty && (url.contains('.m3u8') || url.contains('.mp4'))) {
+              debugPrint('[Extractor] ✅ 2Embed/$domain → $url');
+              return ExtractedStream(
+                url: url,
+                headers: {'Referer': 'https://www.$domain/', 'User-Agent': _ua},
+                providerName: '2Embed',
+              );
+            }
+          } catch (_) {
+            // Not JSON — try regex on HTML
+            final match = RegExp(r'(https?://[^\s"<>]+\.m3u8[^\s"<>]*)').firstMatch(body);
+            if (match != null) {
+              debugPrint('[Extractor] ✅ 2Embed/$domain → ${match.group(1)}');
+              return ExtractedStream(
+                url: match.group(1)!,
+                headers: {'Referer': 'https://www.$domain/', 'User-Agent': _ua},
+                providerName: '2Embed',
+              );
+            }
+          }
+        } catch (_) {
+          continue;
+        }
+      }
+    } catch (e) {
+      debugPrint('[Extractor] 2Embed failed: $e');
     }
     return null;
   }
@@ -377,8 +696,7 @@ class StreamExtractorService {
     return '';
   }
 
-  /// Race Videasy + VidAPI in parallel. Returns first success.
-  /// NO server needed — both are direct HTTP APIs.
+  /// Legacy race API — now delegates to sequential with status reporting
   Future<ExtractedStream?> extractDirectAPIs({
     required String imdbId,
     required String tmdbId,
@@ -387,38 +705,9 @@ class StreamExtractorService {
     int season = 1,
     int episode = 1,
   }) async {
-    if ((tmdbId.isEmpty || tmdbId == '0') && (imdbId.isEmpty)) return null;
-
-    // Race both providers in parallel — first non-null wins
-    final completer = Completer<ExtractedStream?>();
-    int pending = 2;
-
-    void onResult(ExtractedStream? result) {
-      if (result != null && !completer.isCompleted) {
-        completer.complete(result);
-      } else {
-        pending--;
-        if (pending == 0 && !completer.isCompleted) {
-          completer.complete(null);
-        }
-      }
-    }
-
-    // Provider 1: VidAPI (fastest — zero encryption, direct HLS)
-    extractVidAPIDirect(
+    return extractWithStatus(
       imdbId: imdbId, tmdbId: tmdbId, type: type,
-      season: season, episode: episode,
-    ).then(onResult).catchError((_) => onResult(null));
-
-    // Provider 2: Videasy (needs decryption, but wider catalog)
-    extractVideasyDirect(
-      tmdbId: tmdbId, title: title, type: type, imdbId: imdbId,
-      season: season, episode: episode,
-    ).then(onResult).catchError((_) => onResult(null));
-
-    return completer.future.timeout(
-      const Duration(seconds: 15),
-      onTimeout: () => null,
+      title: title, season: season, episode: episode,
     );
   }
 }

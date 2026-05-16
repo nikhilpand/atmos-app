@@ -85,7 +85,9 @@ class _DetailsContent extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final isWide = context.isExpanded;
+    final screenWidth = MediaQuery.sizeOf(context).width;
+    final isWide   = screenWidth >= AppBreakpoints.expanded; // TV/large
+    final isTablet = screenWidth >= AppBreakpoints.compact;  // tablet
 
     return CustomScrollView(
       slivers: [
@@ -145,12 +147,12 @@ class _DetailsContent extends ConsumerWidget {
         SliverToBoxAdapter(
           child: Padding(
             padding: EdgeInsets.symmetric(
-              horizontal: isWide ? 60 : 20,
+              horizontal: isWide ? 60 : isTablet ? 40 : 20,
               vertical: 24,
             ),
             child: isWide
                 ? _TvLayout(details: details)
-                : _MobileLayout(details: details),
+                : _MobileLayout(details: details, isTablet: isTablet),
           ),
         ),
 
@@ -217,31 +219,33 @@ class _BackdropHeader extends StatelessWidget {
 
 class _MobileLayout extends StatelessWidget {
   final TmdbDetails details;
-  const _MobileLayout({required this.details});
+  final bool isTablet;
+  const _MobileLayout({required this.details, this.isTablet = false});
 
   @override
   Widget build(BuildContext context) {
+    final posterW = isTablet ? 160.0 : 120.0;
+    final posterH = isTablet ? 240.0 : 180.0;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Row(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Poster with slide-in
             ClipRRect(
               borderRadius: BorderRadius.circular(16),
               child: CachedNetworkImage(
                 imageUrl: details.posterUrl,
-                width: 120,
-                height: 180,
+                width: posterW,
+                height: posterH,
                 fit: BoxFit.cover,
-                memCacheWidth: 240,
+                memCacheWidth: 320,
               ),
             ).animate()
               .fadeIn(duration: 400.ms, curve: Curves.easeOut)
               .slideX(begin: -0.15, end: 0, duration: 450.ms,
                   curve: const Cubic(0.05, 0.7, 0.1, 1.0)),
-            const SizedBox(width: 16),
+            SizedBox(width: isTablet ? 24 : 16),
             Expanded(
               child: _MediaInfo(details: details),
             ),
@@ -332,16 +336,19 @@ class _MediaInfo extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isWide = context.isExpanded;
+    final cs = Theme.of(context).colorScheme;
+    final screenW = MediaQuery.sizeOf(context).width;
+    final isWide   = screenW >= AppBreakpoints.expanded;
+    final isTablet = screenW >= AppBreakpoints.compact;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Text(
           details.title,
           style: TextStyle(
-            fontSize: isWide ? 36 : 22,
+            fontSize: isWide ? 36 : isTablet ? 28 : 22,
             fontWeight: FontWeight.w800,
-            color: Theme.of(context).colorScheme.onSurface,
+            color: cs.onSurface,
             height: 1.2,
           ),
         ).animate().fadeIn().slideY(begin: 0.1, end: 0),
@@ -561,7 +568,7 @@ class _PlayButtonState extends ConsumerState<_PlayButton> {
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text(
-                'Downloading ${widget.details.title} in ${q.quality} via Telegram ⚡',
+                'Downloading \${widget.details.title} in \${q.quality} via Telegram ⚡',
               ),
               duration: const Duration(seconds: 3),
               behavior: SnackBarBehavior.floating,
@@ -576,74 +583,118 @@ class _PlayButtonState extends ConsumerState<_PlayButton> {
 
   @override
   Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
     final isMovie = widget.details.mediaType == MediaType.movie;
+    final history = ref.watch(historyServiceProvider);
+    final imdbId = widget.details.imdbId ?? '';
+    final saved = imdbId.isNotEmpty
+        ? history.getProgress(imdbId)
+        : null;
+    final hasResume = saved != null &&
+        saved.progressSeconds > 10 &&
+        saved.totalSeconds > 0 &&
+        (saved.progressSeconds / saved.totalSeconds) < 0.95;
+    final resumeLabel = hasResume ? _formatDuration(saved.progressSeconds) : null;
+    final resumePct = hasResume ? (saved.progressSeconds / saved.totalSeconds).clamp(0.0, 1.0) : 0.0;
+
     return Focus(
       autofocus: true,
-      child: Row(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
-          // ── Play button
-          ElevatedButton.icon(
-            onPressed: _onPlay,
-            icon: const Icon(Icons.play_arrow_rounded, size: 24),
-            label: Text(
-              isMovie ? 'Play Movie' : 'Play S01E01',
-              style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+          // ── Resume progress bar ──
+          if (hasResume) ...[
+            ClipRRect(
+              borderRadius: BorderRadius.circular(4),
+              child: LinearProgressIndicator(
+                value: resumePct,
+                backgroundColor: cs.surfaceContainerHighest,
+                color: cs.primary,
+                minHeight: 3,
+              ),
             ),
-            style: ElevatedButton.styleFrom(
-              backgroundColor: Theme.of(context).colorScheme.primary,
-              foregroundColor: Colors.white,
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+            const SizedBox(height: 6),
+            Text(
+              'Continue from $resumeLabel',
+              style: TextStyle(
+                fontSize: 12,
+                color: cs.onSurfaceVariant,
+                fontWeight: FontWeight.w500,
+              ),
             ),
+            const SizedBox(height: 10),
+          ],
+          // ── Buttons row ──
+          Wrap(
+            spacing: 10,
+            runSpacing: 8,
+            children: [
+              ElevatedButton.icon(
+                onPressed: _onPlay,
+                icon: Icon(hasResume ? Icons.play_arrow_rounded : Icons.play_arrow_rounded, size: 24),
+                label: Text(
+                  hasResume ? 'Resume' : (isMovie ? 'Play Movie' : 'Play S01E01'),
+                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                ),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: cs.primary,
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                ),
+              ),
+              if (isMovie) ...[
+                ElevatedButton.icon(
+                  onPressed: _loadingDownload ? null : _onDownload,
+                  icon: _loadingDownload
+                      ? const SizedBox(
+                          width: 18, height: 18,
+                          child: CircularProgressIndicator(
+                              strokeWidth: 2, color: Colors.white))
+                      : const Icon(Icons.download_rounded, size: 20),
+                  label: const Text('Download',
+                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: cs.surfaceContainer,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+                    side: BorderSide(color: cs.primary.withValues(alpha: 0.4)),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                ),
+              ],
+              if (widget.details.trailerKey != null)
+                ElevatedButton.icon(
+                  onPressed: () async {
+                    final uri = Uri.parse('https://www.youtube.com/watch?v=${widget.details.trailerKey}');
+                    if (await canLaunchUrl(uri)) {
+                      await launchUrl(uri, mode: LaunchMode.externalApplication);
+                    }
+                  },
+                  icon: const Icon(Icons.movie_filter_rounded, size: 22),
+                  label: const Text('Trailer',
+                      style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600)),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: cs.surfaceContainerHigh,
+                    foregroundColor: cs.onSurface,
+                    padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                  ),
+                ),
+            ],
           ),
-          if (isMovie) ...[  
-            const SizedBox(width: 10),
-            // ── Download button
-            ElevatedButton.icon(
-              onPressed: _loadingDownload ? null : _onDownload,
-              icon: _loadingDownload
-                  ? const SizedBox(
-                      width: 18, height: 18,
-                      child: CircularProgressIndicator(
-                          strokeWidth: 2, color: Colors.white))
-                  : const Icon(Icons.download_rounded, size: 20),
-              label: const Text('Download',
-                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Theme.of(context).colorScheme.surfaceContainer,
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
-                side: BorderSide(color: Theme.of(context).colorScheme.primary.withValues(alpha: 0.4)),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              ),
-            ),
-          ],
-          if (widget.details.trailerKey != null) ...[
-            const SizedBox(width: 10),
-            ElevatedButton.icon(
-              onPressed: () async {
-                final uri = Uri.parse('https://www.youtube.com/watch?v=${widget.details.trailerKey}');
-                if (await canLaunchUrl(uri)) {
-                  await launchUrl(uri, mode: LaunchMode.externalApplication);
-                }
-              },
-              icon: const Icon(Icons.movie_filter_rounded, size: 24),
-              label: const Text(
-                'Trailer',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-              ),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: Theme.of(context).colorScheme.surfaceContainerHigh,
-                foregroundColor: Theme.of(context).colorScheme.onSurface,
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              ),
-            ),
-          ],
         ],
       ),
     );
+  }
+
+  String _formatDuration(int seconds) {
+    final h = seconds ~/ 3600;
+    final m = (seconds % 3600) ~/ 60;
+    final s = seconds % 60;
+    if (h > 0) return '${h}h ${m}m';
+    return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
   }
 }
 

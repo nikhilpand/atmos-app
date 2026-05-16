@@ -87,6 +87,13 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
   Timer? _countdownTimer;
   bool _showingCountdown = false;
 
+  // ── Player preferences ──
+  double _subtitleSize = 18.0; // sp
+  bool _autoplay = true;
+  bool _repeatMode = false;
+  int _sleepMinutes = 0; // 0 = disabled
+  Timer? _sleepTimer;
+
   // ── Continue Watching: periodic position saver ──
   Timer? _progressTimer;
 
@@ -115,6 +122,15 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
     _player = Player();
     _controller = VideoController(_player);
 
+    // Load saved preferences
+    SharedPreferences.getInstance().then((prefs) {
+      if (!mounted) return;
+      setState(() {
+        _autoplay = prefs.getBool('player_autoplay') ?? true;
+        _subtitleSize = (prefs.getDouble('player_sub_size') ?? 18.0);
+      });
+    });
+
     // Listen for buffering state
     _player.stream.buffering.listen((buffering) {
       if (mounted) setState(() => _isBuffering = buffering);
@@ -137,14 +153,34 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
     _controlsTimer?.cancel();
     _seekAnimTimer?.cancel();
     _gestureHideTimer?.cancel();
-    _countdownTimer?.cancel(); // U7
+    _countdownTimer?.cancel();
+    _sleepTimer?.cancel();
     _positionSub?.cancel();
-    // Save final watch position before teardown
     _saveCurrentPosition();
     _player.dispose();
     SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
     super.dispose();
+  }
+
+  void _startSleepTimer(int minutes) {
+    _sleepTimer = Timer(Duration(minutes: minutes), () {
+      if (!mounted) return;
+      _player.pause();
+      setState(() => _sleepMinutes = 0);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('⏰ Sleep timer ended — playback paused'),
+          behavior: SnackBarBehavior.floating,
+          duration: Duration(seconds: 3),
+        ),
+      );
+    });
+  }
+
+  void _cancelSleepTimer() {
+    _sleepTimer?.cancel();
+    _sleepTimer = null;
   }
 
   /// Persist current playback position to HistoryService.
@@ -427,15 +463,24 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
   // ── Subtitle control ──
 
   void _toggleSubtitle(dynamic subtitle) {
-    if (!mounted || _currentStream == null) return;
+    if (!mounted) return;
     setState(() => _activeSubtitle = subtitle);
-    
-    if (subtitle == -1 || subtitle == SubtitleTrack.no()) {
+
+    if (subtitle == -1 || subtitle == null) {
       _player.setSubtitleTrack(SubtitleTrack.no());
       debugPrint('[Player] Subtitles OFF');
-    } else if (subtitle is int) {
+    } else if (subtitle is SubtitleInfo) {
+      // ── OpenSubtitles result ──
+      _player.setSubtitleTrack(SubtitleTrack.uri(
+        subtitle.url,
+        title: subtitle.label.isNotEmpty ? subtitle.label : subtitle.lang,
+        language: subtitle.lang,
+      ));
+      debugPrint('[Player] OS Subtitle: ${subtitle.label}');
+    } else if (subtitle is int && _currentStream != null) {
       final sub = _currentStream!.subtitles[subtitle];
-      _player.setSubtitleTrack(SubtitleTrack.uri(sub.url, title: sub.displayLabel, language: sub.lang));
+      _player.setSubtitleTrack(SubtitleTrack.uri(
+        sub.url, title: sub.displayLabel, language: sub.lang));
       debugPrint('[Player] API Subtitle: ${sub.displayLabel}');
     } else if (subtitle is SubtitleTrack) {
       _player.setSubtitleTrack(subtitle);
@@ -446,19 +491,20 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
   void _showPlayerSettings() {
     showModalBottomSheet(
       context: context,
-      // P1: Use BackdropFilter frosted glass instead of hardcoded dark color
+      isScrollControlled: true,
+      useSafeArea: true,
       backgroundColor: Colors.transparent,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
       builder: (_) => ClipRRect(
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
         child: BackdropFilter(
           filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
           child: Container(
             decoration: BoxDecoration(
-              color: Colors.black.withValues(alpha: 0.75),
-              borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+              color: Colors.black.withValues(alpha: 0.82),
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
               border: Border.all(color: Colors.white10),
             ),
             child: _PlayerSettingsSheet(
@@ -470,12 +516,31 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
               mediaType: _type,
               season: _season,
               episode: _episode,
+              subtitleSize: _subtitleSize,
+              autoplay: _autoplay,
+              repeatMode: _repeatMode,
+              sleepMinutes: _sleepMinutes,
               onQualitySelect: (q) { _switchQuality(q); Navigator.pop(context); },
               onSubtitleSelect: (sub) { _toggleSubtitle(sub); Navigator.pop(context); },
               onAudioSelect: (track) {
                 _player.setAudioTrack(track);
                 setState(() {});
                 Navigator.pop(context);
+              },
+              onSubtitleSizeChange: (s) => setState(() => _subtitleSize = s),
+              onAutoplayToggle: (v) async {
+                setState(() => _autoplay = v);
+                final prefs = await SharedPreferences.getInstance();
+                await prefs.setBool('player_autoplay', v);
+              },
+              onRepeatToggle: (v) => setState(() {
+                _repeatMode = v;
+                _player.setPlaylistMode(v ? PlaylistMode.single : PlaylistMode.none);
+              }),
+              onSleepTimer: (mins) {
+                setState(() => _sleepMinutes = mins);
+                _cancelSleepTimer();
+                if (mins > 0) _startSleepTimer(mins);
               },
             ),
           ),
@@ -1790,6 +1855,15 @@ class _PlayerSettingsSheet extends StatefulWidget {
   final String mediaType;
   final int season;
   final int episode;
+  // ── New settings params ──
+  final double subtitleSize;
+  final bool autoplay;
+  final bool repeatMode;
+  final int sleepMinutes;
+  final ValueChanged<double> onSubtitleSizeChange;
+  final ValueChanged<bool> onAutoplayToggle;
+  final ValueChanged<bool> onRepeatToggle;
+  final ValueChanged<int> onSleepTimer;
 
   const _PlayerSettingsSheet({
     required this.player,
@@ -1803,11 +1877,20 @@ class _PlayerSettingsSheet extends StatefulWidget {
     required this.mediaType,
     this.season = 0,
     this.episode = 0,
+    this.subtitleSize = 18.0,
+    this.autoplay = true,
+    this.repeatMode = false,
+    this.sleepMinutes = 0,
+    required this.onSubtitleSizeChange,
+    required this.onAutoplayToggle,
+    required this.onRepeatToggle,
+    required this.onSleepTimer,
   });
 
   @override
   State<_PlayerSettingsSheet> createState() => _PlayerSettingsSheetState();
 }
+
 
 class _PlayerSettingsSheetState extends State<_PlayerSettingsSheet> {
   int _tabIndex = 0; // 0=Quality 1=Audio 2=Subtitles
@@ -1884,7 +1967,8 @@ class _PlayerSettingsSheetState extends State<_PlayerSettingsSheet> {
     final tabs = <String>[];
     if (qualities.isNotEmpty) tabs.add('Quality');
     if (audioTracks.length > 1) tabs.add('Audio');
-    tabs.add('Subtitles'); // always show — OpenSubtitles fallback
+    tabs.add('Subtitles');
+    tabs.add('More'); // sleep timer, subtitle size, autoplay, repeat
 
     // Clamp tab index
     final safeTab = _tabIndex.clamp(0, tabs.length - 1);
@@ -1987,12 +2071,11 @@ class _PlayerSettingsSheetState extends State<_PlayerSettingsSheet> {
           }).toList(),
         );
 
-      // ── Subtitles ────────────────────────────────────────────────────────
-      default:
+      // ── Subtitles ────────────────────────────────────────────────
+      case 'Subtitles':
         return Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // Off tile
             _SettingsTile(
               icon: Icons.subtitles_off_rounded,
               title: 'Off',
@@ -2000,8 +2083,6 @@ class _PlayerSettingsSheetState extends State<_PlayerSettingsSheet> {
               cs: cs,
               onTap: () => widget.onSubtitleSelect(-1),
             ),
-
-            // Embedded subtitles
             if (embSubs.where((t) => t.id != 'no').isNotEmpty) ...[
               _sectionLabel('Embedded', cs),
               ...embSubs.where((t) => t.id != 'no').map((t) => _SettingsTile(
@@ -2012,8 +2093,6 @@ class _PlayerSettingsSheetState extends State<_PlayerSettingsSheet> {
                 onTap: () => widget.onSubtitleSelect(t),
               )),
             ],
-
-            // Stream-bundled external subtitles
             if (extSubs.isNotEmpty) ...[
               _sectionLabel('Bundled', cs),
               ...List.generate(extSubs.length, (i) => _SettingsTile(
@@ -2024,8 +2103,6 @@ class _PlayerSettingsSheetState extends State<_PlayerSettingsSheet> {
                 onTap: () => widget.onSubtitleSelect(i),
               )),
             ],
-
-            // OpenSubtitles search
             _sectionLabel('OpenSubtitles Search', cs),
             Row(
               children: [
@@ -2045,8 +2122,7 @@ class _PlayerSettingsSheetState extends State<_PlayerSettingsSheet> {
                       style: const TextStyle(color: Colors.white, fontSize: 13),
                       icon: const Icon(Icons.expand_more_rounded, color: Colors.white54, size: 18),
                       items: _langNames.entries.map((e) => DropdownMenuItem(
-                        value: e.key,
-                        child: Text(e.value),
+                        value: e.key, child: Text(e.value),
                       )).toList(),
                       onChanged: (v) { if (v != null) setState(() => _subLang = v); },
                     ),
@@ -2079,16 +2155,105 @@ class _PlayerSettingsSheetState extends State<_PlayerSettingsSheet> {
                 title: e.value.label.isNotEmpty ? e.value.label : _fmtLang(e.value.lang),
                 active: false,
                 cs: cs,
-                onTap: () {
-                  // Inject into stream externally via callback
-                  widget.onSubtitleSelect(e.value);
-                },
+                onTap: () => widget.onSubtitleSelect(e.value),
               )),
             ],
+            if (_osResults.isEmpty && !_subLoading && _subError == null)
+              const Padding(
+                padding: EdgeInsets.symmetric(vertical: 12),
+                child: Center(child: Text(
+                  'Select a language and tap Search',
+                  style: TextStyle(color: Colors.white38, fontSize: 12))),
+              ),
             const SizedBox(height: 8),
           ],
         );
+
+      // ── More ────────────────────────────────────────────────
+      case 'More':
+        return _buildMoreTab(cs);
+
+      default:
+        return const SizedBox.shrink();
     }
+  }
+
+  Widget _buildMoreTab(ColorScheme cs) {
+    const sleepOptions = [0, 15, 30, 45, 60, 90, 120];
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        // ── Subtitle size slider ──
+        _sectionLabel('Subtitle Size', cs),
+        Row(
+          children: [
+            const Icon(Icons.text_fields_rounded, color: Colors.white38, size: 15),
+            Expanded(
+              child: SliderTheme(
+                data: SliderTheme.of(context).copyWith(
+                  trackHeight: 3,
+                  thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 7),
+                  overlayShape: const RoundSliderOverlayShape(overlayRadius: 14),
+                  activeTrackColor: cs.primary,
+                  inactiveTrackColor: Colors.white12,
+                  thumbColor: cs.primary,
+                  overlayColor: Colors.transparent,
+                ),
+                child: Slider(
+                  value: widget.subtitleSize.clamp(12.0, 32.0),
+                  min: 12, max: 32, divisions: 10,
+                  label: '${widget.subtitleSize.round()}sp',
+                  onChanged: widget.onSubtitleSizeChange,
+                ),
+              ),
+            ),
+            const Icon(Icons.text_fields_rounded, color: Colors.white, size: 22),
+          ],
+        ),
+
+        // ── Sleep timer chips ──
+        _sectionLabel('Sleep Timer', cs),
+        Wrap(
+          spacing: 8, runSpacing: 6,
+          children: sleepOptions.map((m) {
+            final active = widget.sleepMinutes == m;
+            return ChoiceChip(
+              label: Text(m == 0 ? 'Off' : '${m}m'),
+              selected: active,
+              onSelected: (_) => widget.onSleepTimer(m),
+              selectedColor: cs.primaryContainer,
+              backgroundColor: Colors.white10,
+              labelStyle: TextStyle(
+                color: active ? cs.onPrimaryContainer : Colors.white70,
+                fontWeight: active ? FontWeight.w700 : FontWeight.w400,
+                fontSize: 12,
+              ),
+              side: BorderSide.none,
+              shape: const StadiumBorder(),
+            );
+          }).toList(),
+        ),
+
+        // ── Playback toggles ──
+        _sectionLabel('Playback', cs),
+        _ToggleTile(
+          icon: Icons.skip_next_rounded,
+          title: 'Autoplay next episode',
+          value: widget.autoplay,
+          cs: cs,
+          onChanged: widget.onAutoplayToggle,
+        ),
+        const SizedBox(height: 4),
+        _ToggleTile(
+          icon: Icons.repeat_one_rounded,
+          title: 'Repeat this episode',
+          value: widget.repeatMode,
+          cs: cs,
+          onChanged: widget.onRepeatToggle,
+        ),
+        const SizedBox(height: 16),
+      ],
+    );
   }
 
   Widget _sectionLabel(String text, ColorScheme cs) => Padding(
@@ -2156,6 +2321,52 @@ class _SettingsTile extends StatelessWidget {
             ? Icon(Icons.radio_button_checked_rounded, color: cs.primary, size: 18)
             : const Icon(Icons.radio_button_unchecked_rounded, color: Colors.white24, size: 18),
         onTap: onTap,
+      ),
+    );
+  }
+}
+
+// ─── Toggle Tile ──────────────────────────────────────────────────────────────
+
+class _ToggleTile extends StatelessWidget {
+  final IconData icon;
+  final String title;
+  final bool value;
+  final ColorScheme cs;
+  final ValueChanged<bool> onChanged;
+
+  const _ToggleTile({
+    required this.icon,
+    required this.title,
+    required this.value,
+    required this.cs,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 200),
+      margin: const EdgeInsets.symmetric(vertical: 2),
+      decoration: BoxDecoration(
+        color: value ? cs.primaryContainer.withValues(alpha: 0.2) : Colors.transparent,
+        borderRadius: BorderRadius.circular(12),
+        border: value ? Border.all(color: cs.primary.withValues(alpha: 0.3)) : null,
+      ),
+      child: SwitchListTile(
+        dense: true,
+        contentPadding: const EdgeInsets.symmetric(horizontal: 12),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        secondary: Icon(icon, color: value ? cs.primary : Colors.white38, size: 20),
+        title: Text(title,
+          style: TextStyle(
+            color: value ? cs.primary : Colors.white70,
+            fontSize: 13,
+            fontWeight: value ? FontWeight.w600 : FontWeight.w400,
+          )),
+        value: value,
+        activeThumbColor: cs.primary,
+        onChanged: onChanged,
       ),
     );
   }

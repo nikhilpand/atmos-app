@@ -137,13 +137,18 @@ class _RailLayout extends StatelessWidget {
           selectedIndex: selectedIndex,
           onDestinationSelected: onSelected,
           labelType: NavigationRailLabelType.selected,
+          indicatorShape: const StadiumBorder(),
           destinations: kNavDestinations.map((d) => NavigationRailDestination(
-            icon: Icon(d.icon),
+            icon: Tooltip(
+              message: d.label,
+              preferBelow: false,
+              child: Icon(d.icon),
+            ),
             selectedIcon: Icon(d.selectedIcon),
             label: Text(d.label),
           )).toList(),
         ),
-        const VerticalDivider(width: 1),
+        const VerticalDivider(width: 1, thickness: 0.5),
         Expanded(child: body),
       ]),
     );

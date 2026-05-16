@@ -4,7 +4,6 @@ import 'package:flutter_animate/flutter_animate.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import '../models/media_model.dart';
 import '../theme/app_theme.dart';
-import 'responsive_layout.dart';
 
 /// A D-Pad focusable, animated poster card.
 /// Works for both Mobile (touch) and TV (remote control).
@@ -30,12 +29,15 @@ class MediaCard extends StatefulWidget {
 
 class _MediaCardState extends State<MediaCard> {
   bool _isFocused = false;
+  bool _isPressed = false;
 
   @override
   Widget build(BuildContext context) {
-    final isTv = context.isExpanded;
-    final w = widget.width ?? (isTv ? 200.0 : 130.0);
-    final h = widget.height ?? (isTv ? 290.0 : 195.0);
+    final width = MediaQuery.sizeOf(context).width;
+    final isTv     = width >= AppBreakpoints.expanded;  // ≥1200
+    final isTablet = width >= AppBreakpoints.compact;   // ≥600
+    final w = widget.width ?? (isTv ? 200.0 : isTablet ? 160.0 : 130.0);
+    final h = widget.height ?? (isTv ? 290.0 : isTablet ? 235.0 : 195.0);
 
     return Focus(
       autofocus: widget.autofocus,
@@ -45,14 +47,17 @@ class _MediaCardState extends State<MediaCard> {
           HapticFeedback.selectionClick(); // P16: haptic on every card tap
           widget.onTap();
         },
+        onTapDown: (_) => setState(() => _isPressed = true),
+        onTapUp: (_) => setState(() => _isPressed = false),
+        onTapCancel: () => setState(() => _isPressed = false),
         child: AnimatedContainer(
-          duration: const Duration(milliseconds: 180),
-          curve: Curves.easeOut,
+          duration: Duration(milliseconds: _isPressed ? 80 : 250),
+          curve: _isPressed ? Curves.easeIn : AtmosTheme.springSnappy,
           width: w,
           height: h,
           transform: Matrix4.diagonal3Values(
-            _isFocused ? 1.08 : 1.0,
-            _isFocused ? 1.08 : 1.0,
+            _isPressed ? 0.95 : (_isFocused ? 1.08 : 1.0),
+            _isPressed ? 0.95 : (_isFocused ? 1.08 : 1.0),
             1.0,
           ),
           transformAlignment: Alignment.center,
@@ -124,7 +129,7 @@ class _MediaCardState extends State<MediaCard> {
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
-                          fontSize: isTv ? 13 : 11,
+                          fontSize: isTv ? 13 : isTablet ? 12 : 11,
                           fontWeight: FontWeight.w600,
                           color: Theme.of(context).colorScheme.onSurface,
                           height: 1.3,
@@ -258,8 +263,11 @@ class MediaRow extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final isTv = context.isExpanded;
-    final hPad = isTv ? 60.0 : 16.0;
+    final width = MediaQuery.sizeOf(context).width;
+    final isTv     = width >= AppBreakpoints.expanded;
+    final isTablet = width >= AppBreakpoints.compact;
+    final hPad = isTv ? 60.0 : isTablet ? 32.0 : 16.0;
+    final rowH = isTv ? 295.0 : isTablet ? 248.0 : 205.0;
     final cs = Theme.of(context).colorScheme;
 
     return Column(
@@ -297,7 +305,7 @@ class MediaRow extends StatelessWidget {
 
         // ── Animated card list ──
         SizedBox(
-          height: isTv ? 295 : 205,
+          height: rowH,
           child: ListView.builder(
             scrollDirection: Axis.horizontal,
             padding: EdgeInsets.only(left: hPad, right: hPad),
