@@ -60,11 +60,11 @@ class OtaUpdateService {
       if (release.tagName.isEmpty) return null;
 
       final packageInfo = await PackageInfo.fromPlatform();
-      final currentVersion = packageInfo.version;
+      final currentVersion = '${packageInfo.version}+${packageInfo.buildNumber}';
 
-      // Basic semver check (e.g. v1.0.9 vs 1.0.8)
-      final remoteVersionStr = release.tagName.replaceAll('v', '').split('+').first;
-      final localVersionStr = currentVersion.replaceAll('v', '').split('+').first;
+      // Advanced semver check supporting build numbers (e.g. v3.0.0+4 vs 3.0.0+3)
+      final remoteVersionStr = release.tagName.replaceAll('v', '');
+      final localVersionStr = currentVersion.replaceAll('v', '');
 
       if (_isRemoteNewer(remoteVersionStr, localVersionStr)) {
         return release;
@@ -77,16 +77,25 @@ class OtaUpdateService {
   }
 
   bool _isRemoteNewer(String remote, String local) {
-    final rParts = remote.split('.').map((e) => int.tryParse(e) ?? 0).toList();
-    final lParts = local.split('.').map((e) => int.tryParse(e) ?? 0).toList();
+    final rSplit = remote.split('+');
+    final lSplit = local.split('+');
+
+    final rParts = rSplit[0].split('.').map((e) => int.tryParse(e) ?? 0).toList();
+    final lParts = lSplit[0].split('.').map((e) => int.tryParse(e) ?? 0).toList();
     
+    // Compare major.minor.patch
     for (int i = 0; i < 3; i++) {
       final r = i < rParts.length ? rParts[i] : 0;
       final l = i < lParts.length ? lParts[i] : 0;
       if (r > l) return true;
       if (r < l) return false;
     }
-    return false; // Equal
+
+    // Versions match. Compare build number if present
+    final rBuild = rSplit.length > 1 ? (int.tryParse(rSplit[1]) ?? 0) : 0;
+    final lBuild = lSplit.length > 1 ? (int.tryParse(lSplit[1]) ?? 0) : 0;
+    
+    return rBuild > lBuild;
   }
 
   /// Finds the best APK asset for the current architecture
