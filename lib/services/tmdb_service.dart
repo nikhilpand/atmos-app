@@ -4,12 +4,14 @@ import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:hive/hive.dart';
 import '../models/media_model.dart';
 
-/// A Hive-backed cache for TMDB list responses.
-/// Every entry stores the raw JSON list + a timestamp.
-/// Entries older than [_ttl] are considered stale and refreshed on next call.
+// ─── Hive Cache ───────────────────────────────────────────────────────────────
+
+/// Unified Hive-backed cache supporting both List and Map payloads.
+/// Uses two TTLs: fresh (6h for lists) and details (24h for movie/TV details).
 class _TmdbCache {
-  static const _boxName = 'tmdb_cache_v1';
-  static const _ttl = Duration(hours: 6);
+  static const _boxName = 'tmdb_cache_v2';
+  static const _listTtl    = Duration(hours: 6);
+  static const _detailsTtl = Duration(hours: 24);
 
   late Box _box;
   bool _ready = false;
@@ -20,19 +22,82 @@ class _TmdbCache {
     _ready = true;
   }
 
-  /// Returns cached data if fresh, null if stale or missing.
-  List<dynamic>? get(String key) {
+  bool get isReady => _ready;
+
+  // ── List cache ──────────────────────────────────────────────────────────────
+
+  /// Fresh list — returns null if stale or missing.
+  List<dynamic>? getList(String key) {
+    if (!_ready) return null;
+    return _getEntry(key, _listTtl, isList: true) as List<dynamic>?;
+  }
+
+  /// Stale list — returns cached data even if expired (for offline mode).
+  List<dynamic>? getStaleList(String key) {
+    if (!_ready) return null;
+    final entry = _box.get(key);
+    if (entry == null) return null;
+    final data = entry['data'];
+    if (data is List) return List<dynamic>.from(data);
+    return null;
+  }
+
+  Future<void> setList(String key, List<dynamic> data) async {
+    if (!_ready) return;
+    await _box.put(key, {
+      'ts': DateTime.now().millisecondsSinceEpoch,
+      'data': data,
+    });
+  }
+
+  // ── Map cache (details, episodes) ──────────────────────────────────────────
+
+  /// Fresh map — returns null if stale or missing.
+  Map<String, dynamic>? getMap(String key) {
+    if (!_ready) return null;
+    return _getEntry(key, _detailsTtl, isList: false) as Map<String, dynamic>?;
+  }
+
+  /// Stale map — always returns if present regardless of age.
+  Map<String, dynamic>? getStaleMap(String key) {
+    if (!_ready) return null;
+    final entry = _box.get(key);
+    if (entry == null) return null;
+    final data = entry['data'];
+    if (data is Map) return Map<String, dynamic>.from(data);
+    return null;
+  }
+
+  Future<void> setMap(String key, Map<String, dynamic> data) async {
+    if (!_ready) return;
+    await _box.put(key, {
+      'ts': DateTime.now().millisecondsSinceEpoch,
+      'data': data,
+    });
+  }
+
+  // ── Episodes (list of maps) ─────────────────────────────────────────────────
+
+  List<Map<String, dynamic>>? getEpisodes(String key) {
     if (!_ready) return null;
     final entry = _box.get(key);
     if (entry == null) return null;
     final ts = entry['ts'] as int? ?? 0;
-    if (DateTime.now().millisecondsSinceEpoch - ts > _ttl.inMilliseconds) {
-      return null; // stale
-    }
-    return List<dynamic>.from(entry['data'] as List? ?? []);
+    final age = DateTime.now().millisecondsSinceEpoch - ts;
+    if (age > _detailsTtl.inMilliseconds) return null;
+    final data = entry['data'] as List? ?? [];
+    return data.map((e) => Map<String, dynamic>.from(e)).toList();
   }
 
-  Future<void> set(String key, List<dynamic> data) async {
+  List<Map<String, dynamic>>? getStaleEpisodes(String key) {
+    if (!_ready) return null;
+    final entry = _box.get(key);
+    if (entry == null) return null;
+    final data = entry['data'] as List? ?? [];
+    return data.map((e) => Map<String, dynamic>.from(e)).toList();
+  }
+
+  Future<void> setEpisodes(String key, List<Map<String, dynamic>> data) async {
     if (!_ready) return;
     await _box.put(key, {
       'ts': DateTime.now().millisecondsSinceEpoch,
@@ -41,7 +106,24 @@ class _TmdbCache {
   }
 
   Future<void> clear() async => _box.clear();
+
+  // ── Internal ────────────────────────────────────────────────────────────────
+
+  dynamic _getEntry(String key, Duration ttl, {required bool isList}) {
+    final entry = _box.get(key);
+    if (entry == null) return null;
+    final ts = entry['ts'] as int? ?? 0;
+    if (DateTime.now().millisecondsSinceEpoch - ts > ttl.inMilliseconds) {
+      return null; // stale
+    }
+    final data = entry['data'];
+    if (isList && data is List) return List<dynamic>.from(data);
+    if (!isList && data is Map) return Map<String, dynamic>.from(data);
+    return null;
+  }
 }
+
+// ─── TmdbService ─────────────────────────────────────────────────────────────
 
 class TmdbService {
   late final String _base;
@@ -70,15 +152,15 @@ class TmdbService {
     return Uri.parse('$_base$path').replace(queryParameters: params);
   }
 
-  /// Perform GET and decode JSON.
+  /// Perform GET and decode JSON. Throws on failure.
   Future<Map<String, dynamic>> _get(String path, [Map<String, dynamic>? queryParams]) async {
     final uri = _uri(path, queryParams);
-    final res = await http.get(uri).timeout(const Duration(seconds: 20));
+    final res = await http.get(uri).timeout(const Duration(seconds: 15));
     if (res.statusCode != 200) throw Exception('TMDB ${res.statusCode}');
     return jsonDecode(res.body) as Map<String, dynamic>;
   }
 
-  // ── Genre Constants ──────────────────────────────────────────────────────────
+  // ── Genre Constants ─────────────────────────────────────────────────────────
 
   static const movieGenres = <int, ({String name, String emoji})>{
     28:     (name: 'Action',      emoji: '💥'),
@@ -118,31 +200,35 @@ class TmdbService {
     37:     (name: 'Western',     emoji: '🤠'),
   };
 
-  // ── Cached list helper ───────────────────────────────────────────────────────
+  // ── Stale-while-revalidate list helper ──────────────────────────────────────
 
+  /// Returns cached data immediately if fresh.
+  /// If stale/missing, fetches and caches. On network error, returns stale data.
   Future<List<TmdbMedia>> _getCached(
     String cacheKey,
     String path, {
     Map<String, dynamic>? queryParams,
     MediaType? defaultType,
   }) async {
-    // Try cache first
-    final cached = _cache.get(cacheKey);
-    if (cached != null) {
-      return _parseResults(cached, defaultType: defaultType);
-    }
-    // Fetch fresh
+    // 1. Return fresh cache immediately
+    final fresh = _cache.getList(cacheKey);
+    if (fresh != null) return _parseResults(fresh, defaultType: defaultType);
+
+    // 2. Fetch from network
     try {
       final data = await _get(path, queryParams);
       final results = data['results'] as List? ?? [];
-      await _cache.set(cacheKey, results);
+      await _cache.setList(cacheKey, results);
       return _parseResults(results, defaultType: defaultType);
     } catch (_) {
+      // 3. Network failed — return stale cache (offline fallback)
+      final stale = _cache.getStaleList(cacheKey);
+      if (stale != null) return _parseResults(stale, defaultType: defaultType);
       return [];
     }
   }
 
-  // ── Home / Discovery ─────────────────────────────────────────────────────────
+  // ── Home / Discovery ────────────────────────────────────────────────────────
 
   Future<List<TmdbMedia>> getTrending({String window = 'week'}) =>
       _getCached('trending_$window', '/trending/all/$window');
@@ -175,7 +261,7 @@ class TmdbService {
       _getCached('upcoming', '/movie/upcoming',
           defaultType: MediaType.movie);
 
-  // ── Genre Discovery ──────────────────────────────────────────────────────────
+  // ── Genre Discovery ─────────────────────────────────────────────────────────
 
   Future<List<TmdbMedia>> discoverByGenre(
     int genreId, {
@@ -200,29 +286,25 @@ class TmdbService {
     );
   }
 
-  // ── Recommendations & Similar ────────────────────────────────────────────────
+  // ── Recommendations & Similar ───────────────────────────────────────────────
 
   Future<List<TmdbMedia>> getRecommendations(int tmdbId, MediaType type) async {
-    try {
-      final path = type == MediaType.movie
-          ? '/movie/$tmdbId/recommendations'
-          : '/tv/$tmdbId/recommendations';
-      final data = await _get(path);
-      return _parseResults(data['results'] ?? [], defaultType: type);
-    } catch (_) { return []; }
+    final cacheKey = 'recs_${type.name}_$tmdbId';
+    final path = type == MediaType.movie
+        ? '/movie/$tmdbId/recommendations'
+        : '/tv/$tmdbId/recommendations';
+    return _getCached(cacheKey, path, defaultType: type);
   }
 
   Future<List<TmdbMedia>> getSimilar(int tmdbId, MediaType type) async {
-    try {
-      final path = type == MediaType.movie
-          ? '/movie/$tmdbId/similar'
-          : '/tv/$tmdbId/similar';
-      final data = await _get(path);
-      return _parseResults(data['results'] ?? [], defaultType: type);
-    } catch (_) { return []; }
+    final cacheKey = 'similar_${type.name}_$tmdbId';
+    final path = type == MediaType.movie
+        ? '/movie/$tmdbId/similar'
+        : '/tv/$tmdbId/similar';
+    return _getCached(cacheKey, path, defaultType: type);
   }
 
-  // ── Search ───────────────────────────────────────────────────────────────────
+  // ── Search ──────────────────────────────────────────────────────────────────
 
   Future<List<TmdbMedia>> search(String query, {int page = 1}) async {
     if (query.trim().isEmpty) return [];
@@ -236,20 +318,44 @@ class TmdbService {
     } catch (_) { return []; }
   }
 
-  // ── Details ──────────────────────────────────────────────────────────────────
+  // ── Details (cached 24h + offline stale fallback) ──────────────────────────
 
   Future<TmdbDetails> getMovieDetails(int tmdbId) async {
-    final data = await _get('/movie/$tmdbId', {
-      'append_to_response': 'credits,external_ids,videos',
-    });
-    return TmdbDetails.fromJson(data, MediaType.movie);
+    final key = 'movie_detail_$tmdbId';
+    // Fresh cache?
+    final cached = _cache.getMap(key);
+    if (cached != null) return TmdbDetails.fromJson(cached, MediaType.movie);
+
+    try {
+      final data = await _get('/movie/$tmdbId', {
+        'append_to_response': 'credits,external_ids,videos',
+      });
+      await _cache.setMap(key, data);
+      return TmdbDetails.fromJson(data, MediaType.movie);
+    } catch (_) {
+      // Offline stale fallback
+      final stale = _cache.getStaleMap(key);
+      if (stale != null) return TmdbDetails.fromJson(stale, MediaType.movie);
+      rethrow;
+    }
   }
 
   Future<TmdbDetails> getTvDetails(int tmdbId) async {
-    final data = await _get('/tv/$tmdbId', {
-      'append_to_response': 'credits,external_ids,videos',
-    });
-    return TmdbDetails.fromJson(data, MediaType.tv);
+    final key = 'tv_detail_$tmdbId';
+    final cached = _cache.getMap(key);
+    if (cached != null) return TmdbDetails.fromJson(cached, MediaType.tv);
+
+    try {
+      final data = await _get('/tv/$tmdbId', {
+        'append_to_response': 'credits,external_ids,videos',
+      });
+      await _cache.setMap(key, data);
+      return TmdbDetails.fromJson(data, MediaType.tv);
+    } catch (_) {
+      final stale = _cache.getStaleMap(key);
+      if (stale != null) return TmdbDetails.fromJson(stale, MediaType.tv);
+      rethrow;
+    }
   }
 
   Future<String?> getImdbId(int tmdbId, MediaType type) async {
@@ -262,20 +368,34 @@ class TmdbService {
     } catch (_) { return null; }
   }
 
-  // ── Episodes ─────────────────────────────────────────────────────────────────
+  // ── Episodes (cached 24h + offline stale fallback) ─────────────────────────
 
   Future<List<Episode>> getEpisodes(int tmdbId, int season) async {
-    final data = await _get('/tv/$tmdbId/season/$season');
-    return (data['episodes'] as List? ?? [])
-        .map((e) => Episode.fromJson(e))
-        .toList();
+    final key = 'episodes_${tmdbId}_$season';
+
+    // Fresh cache?
+    final cached = _cache.getEpisodes(key);
+    if (cached != null) return cached.map((e) => Episode.fromJson(e)).toList();
+
+    try {
+      final data = await _get('/tv/$tmdbId/season/$season');
+      final episodes = (data['episodes'] as List? ?? [])
+          .map((e) => Map<String, dynamic>.from(e))
+          .toList();
+      await _cache.setEpisodes(key, episodes);
+      return episodes.map((e) => Episode.fromJson(e)).toList();
+    } catch (_) {
+      final stale = _cache.getStaleEpisodes(key);
+      if (stale != null) return stale.map((e) => Episode.fromJson(e)).toList();
+      return [];
+    }
   }
 
-  // ── Cache management ─────────────────────────────────────────────────────────
+  // ── Cache management ────────────────────────────────────────────────────────
 
   Future<void> clearCache() => _cache.clear();
 
-  // ── Helper ───────────────────────────────────────────────────────────────────
+  // ── Helper ──────────────────────────────────────────────────────────────────
 
   List<TmdbMedia> _parseResults(List results, {MediaType? defaultType}) {
     return results

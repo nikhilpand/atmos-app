@@ -44,29 +44,27 @@ void main() async {
   final downloadDir = extDir?.path ?? (await getApplicationDocumentsDirectory()).path;
 
   final historyService = HistoryService();
-  await historyService.init();
-
   final downloadService = DownloadService();
-  await downloadService.init(downloadDir);
-
   final telegramService = TelegramService();
-  await telegramService.init();
-  try {
-    await telegramService.whenReady.timeout(const Duration(seconds: 5));
-  } catch (e) {
-    debugPrint('[Main] Telegram service ready timeout or error: $e');
-  }
-  // Recommendation service — taste profile engine
   final recommendationService = RecommendationService();
-  await recommendationService.init();
-
-  // Watchlist — bookmark service
   final watchlistService = WatchlistService();
-  await watchlistService.init();
-
-  // Init TMDB cache (Hive box for 6hr TTL responses)
   final tmdbService = TmdbService();
-  await tmdbService.initCache();
+
+  // Parallelize IO and local database inits
+  await Future.wait([
+    historyService.init(),
+    downloadService.init(downloadDir),
+    recommendationService.init(),
+    watchlistService.init(),
+    tmdbService.initCache(),
+  ]);
+
+  // Telegram init touches network/TDLib and blocks. Push it to background.
+  telegramService.init().then((_) {
+    telegramService.whenReady.timeout(const Duration(seconds: 5)).catchError((e) {
+      debugPrint('[Main] Telegram service ready timeout or error: $e');
+    });
+  });
 
   downloadService.telegramService = telegramService;
   telegramService.addListener(() {

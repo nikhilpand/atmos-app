@@ -9,6 +9,7 @@ import 'package:screen_brightness/screen_brightness.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:volume_controller/volume_controller.dart';
 import 'package:go_router/go_router.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import '../services/stream_extractor_service.dart';
 import '../services/subtitle_service.dart' as opensubs;
 import '../providers/providers.dart';
@@ -118,6 +119,7 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
       DeviceOrientation.landscapeRight,
     ]);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+    WakelockPlus.enable();
 
     _player = Player();
     _controller = VideoController(_player);
@@ -160,6 +162,7 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
     _player.dispose();
     SystemChrome.setPreferredOrientations([DeviceOrientation.portraitUp]);
     SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    WakelockPlus.disable();
     super.dispose();
   }
 
