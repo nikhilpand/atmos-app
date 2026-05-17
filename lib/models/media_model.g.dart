@@ -27,13 +27,14 @@ class WatchHistoryAdapter extends TypeAdapter<WatchHistory> {
       season: fields[7] as int?,
       episode: fields[8] as int?,
       episodeName: fields[9] as String?,
+      tmdbId: fields[10] as int,
     );
   }
 
   @override
   void write(BinaryWriter writer, WatchHistory obj) {
     writer
-      ..writeByte(10)
+      ..writeByte(11)
       ..writeByte(0)
       ..write(obj.imdbId)
       ..writeByte(1)
@@ -53,7 +54,9 @@ class WatchHistoryAdapter extends TypeAdapter<WatchHistory> {
       ..writeByte(8)
       ..write(obj.episode)
       ..writeByte(9)
-      ..write(obj.episodeName);
+      ..write(obj.episodeName)
+      ..writeByte(10)
+      ..write(obj.tmdbId);
   }
 
   @override

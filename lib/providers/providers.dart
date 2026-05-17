@@ -11,6 +11,10 @@ import '../services/recommendation_service.dart';
 import '../services/watchlist_service.dart';
 import '../services/subtitle_service.dart';
 import '../services/ota_update_service.dart';
+import '../services/stream_extractor_service.dart';
+import '../services/torrentio_service.dart';
+import '../services/vegamovies_service.dart';
+import '../services/stremio_addon_service.dart';
 import '../theme/app_tokens.dart';
 
 // ─── Core Service Providers ───────────────────────────────────────────────────
@@ -48,6 +52,26 @@ final subtitleServiceProvider = Provider<SubtitleService>((ref) => SubtitleServi
 
 /// GitHub OTA updater — checks for new releases and downloads APKs.
 final otaUpdateProvider = Provider<OtaUpdateService>((ref) => OtaUpdateService());
+
+/// Stream extractor service — races all providers in parallel.
+final streamExtractorProvider = Provider<StreamExtractorService>(
+  (ref) => StreamExtractorService(),
+);
+
+/// Torrentio service — free Stremio addon for torrent sources.
+final torrentioServiceProvider = Provider<TorrentioService>(
+  (ref) => TorrentioService(),
+);
+
+/// VegaMovies service — DDL scraper for Indian content via CF Worker.
+final vegaMoviesServiceProvider = Provider<VegaMoviesService>(
+  (ref) => VegaMoviesService(),
+);
+
+/// Stremio addon service — generic client for community addons.
+final stremioAddonServiceProvider = Provider<StremioAddonService>(
+  (ref) => StremioAddonService(),
+);
 
 /// Current download source preference (telegram only).
 final downloadSourceProvider = StateProvider<DownloadSource>(

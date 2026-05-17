@@ -27,13 +27,14 @@ class QualityOptionAdapter extends TypeAdapter<QualityOption> {
       seeders: fields[7] as int,
       telegramFileId: fields[8] as int?,
       channelName: fields[9] as String?,
+      fileName: fields[10] as String?,
     );
   }
 
   @override
   void write(BinaryWriter writer, QualityOption obj) {
     writer
-      ..writeByte(10)
+      ..writeByte(11)
       ..writeByte(0)
       ..write(obj.quality)
       ..writeByte(1)
@@ -53,7 +54,9 @@ class QualityOptionAdapter extends TypeAdapter<QualityOption> {
       ..writeByte(8)
       ..write(obj.telegramFileId)
       ..writeByte(9)
-      ..write(obj.channelName);
+      ..write(obj.channelName)
+      ..writeByte(10)
+      ..write(obj.fileName);
   }
 
   @override
@@ -100,13 +103,15 @@ class DownloadTaskAdapter extends TypeAdapter<DownloadTask> {
       source: fields[19] as String,
       telegramFileId: fields[20] as int?,
       downloadSpeed: fields[21] as double,
+      retryCount: fields[22] as int,
+      httpStreamUrl: fields[23] as String?,
     );
   }
 
   @override
   void write(BinaryWriter writer, DownloadTask obj) {
     writer
-      ..writeByte(22)
+      ..writeByte(24)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -150,7 +155,11 @@ class DownloadTaskAdapter extends TypeAdapter<DownloadTask> {
       ..writeByte(20)
       ..write(obj.telegramFileId)
       ..writeByte(21)
-      ..write(obj.downloadSpeed);
+      ..write(obj.downloadSpeed)
+      ..writeByte(22)
+      ..write(obj.retryCount)
+      ..writeByte(23)
+      ..write(obj.httpStreamUrl);
   }
 
   @override

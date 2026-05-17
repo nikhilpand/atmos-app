@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hive_flutter/hive_flutter.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/download_model.dart';
 import 'telegram_service.dart';
@@ -67,8 +68,8 @@ class DownloadService extends ChangeNotifier {
   }
 
   @override
-  Future<void> dispose() async {
-    await _box.close();
+  void dispose() {
+    _box.close();
     super.dispose();
   }
 
@@ -256,85 +257,129 @@ class DownloadService extends ChangeNotifier {
   }
 
   /// HTTP download processor — handles MP4 direct downloads with progress.
+  /// Supports HTTP Range-based resume for interrupted downloads.
   Future<void> _processHttpDownload(
-    DownloadTask task, String url, Map<String, String> headers,
-  ) async {
-    try {
-      final client = HttpClient();
-      final request = await client.getUrl(Uri.parse(url));
-      headers.forEach((k, v) => request.headers.set(k, v));
+    DownloadTask task, String url, Map<String, String> headers, {
+    int maxRetries = 3,
+  }) async {
+    for (int attempt = 0; attempt <= maxRetries; attempt++) {
+      try {
+        final client = HttpClient();
+        final request = await client.getUrl(Uri.parse(url));
+        headers.forEach((k, v) => request.headers.set(k, v));
 
-      final response = await request.close();
-      if (response.statusCode != 200 && response.statusCode != 206) {
-        await _failTask(task, 'HTTP ${response.statusCode}');
-        client.close();
-        return;
-      }
+        // Build filename
+        final safeTitle = task.title.replaceAll(RegExp(r'[^\w\s-]'), '').replaceAll(' ', '_');
+        final ext = url.contains('.mkv') ? 'mkv' : 'mp4';
+        final seasonTag = task.season != null ? '_S${task.season}E${task.episode}' : '';
+        final dir = await _getDownloadDir();
+        final filePath = '${dir.path}/$safeTitle${seasonTag}_${task.quality}.$ext';
+        final file = File(filePath);
 
-      final totalBytes = response.contentLength;
-      if (totalBytes > 0) {
-        task.fileSizeBytes = totalBytes;
-      }
+        // ── HTTP Range Resume ──
+        // If partial file exists, resume from where we left off
+        int startByte = 0;
+        if (await file.exists()) {
+          startByte = await file.length();
+          if (startByte > 0) {
+            request.headers.set('Range', 'bytes=$startByte-');
+            debugPrint('[DownloadService] Resuming from byte $startByte');
+          }
+        }
 
-      // Build filename
-      final safeTitle = task.title.replaceAll(RegExp(r'[^\w\s-]'), '').replaceAll(' ', '_');
-      final ext = url.contains('.mkv') ? 'mkv' : 'mp4';
-      final seasonTag = task.season != null ? '_S${task.season}E${task.episode}' : '';
-      final dir = await _getDownloadDir();
-      final filePath = '${dir.path}/$safeTitle${seasonTag}_${task.quality}.$ext';
-
-      final file = File(filePath);
-      final sink = file.openWrite();
-
-      int received = 0;
-      DateTime lastSpeedCheck = DateTime.now();
-      int lastBytes = 0;
-
-      await for (final chunk in response) {
-        if (task.status == DownloadStatus.paused) {
-          sink.close();
+        final response = await request.close();
+        if (response.statusCode != 200 && response.statusCode != 206) {
+          await _failTask(task, 'HTTP ${response.statusCode}');
           client.close();
           return;
         }
 
-        sink.add(chunk);
-        received += chunk.length;
-
-        // Calculate speed every 500ms
-        final now = DateTime.now();
-        final dt = now.difference(lastSpeedCheck).inMilliseconds;
-        if (dt > 500) {
-          final db = received - lastBytes;
-          task.downloadSpeed = db / (dt / 1000.0);
-          lastBytes = received;
-          lastSpeedCheck = now;
+        // Get total size from Content-Range or Content-Length
+        final contentRange = response.headers['content-range']?.first;
+        int totalBytes;
+        if (contentRange != null) {
+          // Format: bytes 123-456/789
+          final totalMatch = RegExp(r'/(\d+)').firstMatch(contentRange);
+          totalBytes = int.tryParse(totalMatch?.group(1) ?? '') ?? -1;
+        } else {
+          totalBytes = response.contentLength + startByte;
+        }
+        if (totalBytes > 0) {
+          task.fileSizeBytes = totalBytes;
         }
 
-        task.downloadedBytes = received;
-        task.progress = totalBytes > 0 ? received / totalBytes : 0;
-        task.save();
+        // Open file in APPEND mode for resume, or WRITE for fresh start
+        final sink = file.openWrite(mode: startByte > 0 ? FileMode.append : FileMode.write);
+
+        int received = startByte;
+        DateTime lastSpeedCheck = DateTime.now();
+        int lastBytes = received;
+
+        await for (final chunk in response) {
+          if (task.status == DownloadStatus.paused) {
+            await sink.close();
+            client.close();
+            return;
+          }
+
+          sink.add(chunk);
+          received += chunk.length;
+
+          // Calculate speed every 500ms
+          final now = DateTime.now();
+          final dt = now.difference(lastSpeedCheck).inMilliseconds;
+          if (dt > 500) {
+            final db = received - lastBytes;
+            task.downloadSpeed = db / (dt / 1000.0);
+            lastBytes = received;
+            lastSpeedCheck = now;
+          }
+
+          task.downloadedBytes = received;
+          task.progress = totalBytes > 0 ? received / totalBytes : 0;
+          task.save();
+          _scheduleNotify();
+        }
+
+        await sink.close();
+        client.close();
+
+        task.status = DownloadStatus.completed;
+        task.filePath = filePath;
+        task.progress = 1.0;
+        task.downloadSpeed = 0;
+        await task.save();
         _scheduleNotify();
+        _processNextQueued();
+
+        debugPrint('[DownloadService] Stream download complete: $filePath');
+        return; // Success — exit retry loop
+      } catch (e) {
+        if (attempt < maxRetries) {
+          // Exponential backoff: 2s, 4s, 8s
+          final delay = Duration(seconds: (1 << attempt) * 2);
+          debugPrint('[DownloadService] Retry ${attempt + 1}/$maxRetries in ${delay.inSeconds}s: $e');
+          await Future.delayed(delay);
+        } else {
+          await _failTask(task, 'Stream download failed after ${maxRetries + 1} attempts: $e');
+        }
       }
-
-      await sink.close();
-      client.close();
-
-      task.status = DownloadStatus.completed;
-      task.filePath = filePath;
-      task.progress = 1.0;
-      task.downloadSpeed = 0;
-      await task.save();
-      _scheduleNotify();
-      _processNextQueued();
-
-      debugPrint('[DownloadService] Stream download complete: $filePath');
-    } catch (e) {
-      await _failTask(task, 'Stream download failed: $e');
     }
   }
 
   Future<Directory> _getDownloadDir() async {
-    final dir = Directory('/storage/emulated/0/Download');
+    // Use path_provider for reliable cross-device paths
+    try {
+      final extDirs = await getExternalStorageDirectories();
+      if (extDirs != null && extDirs.isNotEmpty) {
+        final dir = Directory('${extDirs.first.parent.parent.parent.parent.path}/Download/Atmos');
+        if (!await dir.exists()) await dir.create(recursive: true);
+        return dir;
+      }
+    } catch (_) {}
+    // Fallback to app-specific directory
+    final appDir = await getApplicationDocumentsDirectory();
+    final dir = Directory('${appDir.path}/Atmos');
     if (!await dir.exists()) await dir.create(recursive: true);
     return dir;
   }
@@ -342,7 +387,17 @@ class DownloadService extends ChangeNotifier {
   Future<void> pauseTask(String id) async {
     final task = _box.get(id);
     if (task == null) return;
+    // Actually cancel the TDLib download to stop bandwidth waste
+    if (task.telegramFileId != null && telegramService != null) {
+      try {
+        telegramService!.cancelDownload(task.telegramFileId!);
+        debugPrint('[DownloadService] TDLib download cancelled for fileId: ${task.telegramFileId}');
+      } catch (e) {
+        debugPrint('[DownloadService] TDLib cancel failed (non-fatal): $e');
+      }
+    }
     task.status = DownloadStatus.paused;
+    task.downloadSpeed = 0;
     await task.save();
     _scheduleNotify();
   }

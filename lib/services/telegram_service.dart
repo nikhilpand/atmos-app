@@ -377,10 +377,13 @@ class TelegramService extends ChangeNotifier {
       });
     }
 
-    final r1 = await fire(const td.SearchMessagesFilterDocument());
-    final r2 = await fire(const td.SearchMessagesFilterVideo());
+    // Fire Document + Video searches in PARALLEL for 2x speed
+    final results = await Future.wait([
+      fire(const td.SearchMessagesFilterDocument()),
+      fire(const td.SearchMessagesFilterVideo()),
+    ]);
     final seen = <int>{};
-    return [...r1, ...r2].where((r) => seen.add(r.fileId)).toList();
+    return [...results[0], ...results[1]].where((r) => seen.add(r.fileId)).toList();
   }
 
   /// Convert Telegram search results to QualityOptions for the unified picker.
@@ -550,7 +553,7 @@ class TelegramService extends ChangeNotifier {
           apiId: int.tryParse(dotenv.env['TELEGRAM_API_ID'] ?? '') ?? 0,
           apiHash: dotenv.env['TELEGRAM_API_HASH'] ?? '',
           databaseDirectory: '$_tdLibPath/db',
-          filesDirectory: '/storage/emulated/0/Download/Atmos',
+          filesDirectory: '$_tdLibPath/downloads',
           useTestDc: false,
           useSecretChats: false,
           useMessageDatabase: true,
@@ -618,8 +621,8 @@ class TelegramService extends ChangeNotifier {
   }
 
   void _handleSearchResults(td.FoundMessages found, {int? extraId}) {
-    const minBytes = 50 * 1024 * 1024;        // 50 MB — skip trailers / fakes
-    const maxBytes = 5 * 1024 * 1024 * 1024;  //  5 GB — skip 4K remux monsters
+    const minBytes = 50 * 1024 * 1024;                 // 50 MB — skip trailers / fakes
+    const maxBytes = 5 * 1024 * 1024 * 1024;             //  5 GB — explicit int (safe on all platforms)
 
     final results = <TelegramSearchResult>[];
     

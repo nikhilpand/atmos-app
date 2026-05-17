@@ -280,37 +280,4 @@ class Cast {
       profilePath != null ? 'https://image.tmdb.org/t/p/w185$profilePath' : '';
 }
 
-class StreamResult {
-  final bool success;
-  final String? primaryStream;
-  final List<String> allStreams;
-  final String provider;
-  final String referer;
-  final String? error;
 
-  StreamResult({
-    required this.success,
-    this.primaryStream,
-    required this.allStreams,
-    required this.provider,
-    required this.referer,
-    this.error,
-  });
-
-  factory StreamResult.fromJson(Map<String, dynamic> j) => StreamResult(
-        success: j['success'] ?? false,
-        primaryStream: j['primary'],
-        allStreams: (j['streams'] as List? ?? []).cast<String>(),
-        provider: j['provider'] ?? '',
-        referer: j['referer'] ?? '',
-        error: j['error'],
-      );
-
-  factory StreamResult.error(String message) => StreamResult(
-        success: false,
-        allStreams: [],
-        provider: '',
-        referer: '',
-        error: message,
-      );
-}

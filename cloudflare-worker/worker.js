@@ -336,6 +336,71 @@ export default {
     }
 
     // ══════════════════════════════════════════════════════════════════════════
+    // VegaMovies DDL Scraper
+    // ══════════════════════════════════════════════════════════════════════════
+    if (url.pathname === '/vegamovies/search') {
+      const q = url.searchParams.get('q');
+      const year = url.searchParams.get('year') || '';
+      if (!q) return new Response(JSON.stringify({results: []}), {headers: corsHeaders});
+      
+      try {
+        const searchUrl = `https://vegamovies.foo/?s=${encodeURIComponent(q)}+${year}`;
+        const res = await fetch(searchUrl, {
+          headers: { 'User-Agent': UA }
+        });
+        const html = await res.text();
+        
+        const results = [];
+        const regex = /<article[^>]*>.*?<a href="([^"]+)".*?title="([^"]+)".*?src="([^"]+)"/gs;
+        let match;
+        while ((match = regex.exec(html)) !== null) {
+          results.push({
+            post_url: match[1],
+            title: match[2],
+            poster_url: match[3],
+          });
+        }
+        return new Response(JSON.stringify({results}), { headers: corsHeaders });
+      } catch (e) {
+        return new Response(JSON.stringify({error: e.message}), {status: 500, headers: corsHeaders});
+      }
+    }
+
+    if (url.pathname === '/vegamovies/links') {
+      const target = url.searchParams.get('url');
+      if (!target) return new Response('Missing url', {status: 400});
+      
+      try {
+        const res = await fetch(target, {
+          headers: { 'User-Agent': UA }
+        });
+        const html = await res.text();
+        
+        const links = [];
+        // Regex to find download buttons/links for GDrive, PixelDrain, HubCloud
+        const linkRegex = /href="(https?:\/\/(?:drive\.google\.com|pixeldrain\.com|[^"]*hubcloud[^"]*)[^"]*)"/gi;
+        let match;
+        while ((match = linkRegex.exec(html)) !== null) {
+          const lUrl = match[1];
+          let host = 'direct';
+          if (lUrl.includes('drive.google')) host = 'gdrive';
+          if (lUrl.includes('pixeldrain')) host = 'pixeldrain';
+          if (lUrl.includes('hubcloud')) host = 'hubcloud';
+          
+          links.push({
+            url: lUrl,
+            host,
+            quality: 'HD', // Simplified parsing
+            language: 'Hindi/English',
+          });
+        }
+        return new Response(JSON.stringify({links}), { headers: corsHeaders });
+      } catch (e) {
+        return new Response(JSON.stringify({error: e.message}), {status: 500, headers: corsHeaders});
+      }
+    }
+
+    // ══════════════════════════════════════════════════════════════════════════
     // AtmosIndex — Telegram Content Discovery
     // ══════════════════════════════════════════════════════════════════════════
 

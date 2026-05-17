@@ -4,6 +4,9 @@ import 'package:http/http.dart' as http;
 import 'package:flutter/material.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'torrentio_service.dart';
+import 'vegamovies_service.dart';
+import 'stremio_addon_service.dart';
 
 /// A single subtitle track from a provider
 class SubtitleInfo {
@@ -67,7 +70,12 @@ class StreamExtractorService {
   static const _ua = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
   /// All available provider keys for server selection UI
-  static const availableProviders = ['VidAPI', 'AutoEmbed', 'Videasy', 'VidSrc', '2Embed'];
+  static const availableProviders = ['VidAPI', 'Videasy', 'Torrentio', 'VegaMovies', 'AutoEmbed', 'VidSrc', '2Embed', 'Stremio'];
+
+  // Lazy-initialized external providers
+  final _torrentioService = TorrentioService();
+  final _vegaMoviesService = VegaMoviesService();
+  final _stremioAddonService = StremioAddonService();
 
   /// Track last successful provider per content for smarter ordering.
   /// Persisted to SharedPreferences across app restarts.
@@ -198,6 +206,20 @@ class StreamExtractorService {
         return extractVidSrcDirect(imdbId: imdbId, tmdbId: tmdbId, type: type, season: season, episode: episode);
       case '2Embed':
         return extract2EmbedDirect(tmdbId: tmdbId, type: type, season: season, episode: episode);
+      case 'Torrentio':
+        return _torrentioService.extractStream(
+          imdbId: imdbId, type: type, season: season, episode: episode,
+        );
+      case 'VegaMovies':
+        return _vegaMoviesService.extractStream(
+          title: title,
+          year: null,
+          qualityFilter: null,
+        );
+      case 'Stremio':
+        return _stremioAddonService.extractBestStream(
+          imdbId: imdbId, type: type, season: season, episode: episode,
+        );
       default:
         return null;
     }

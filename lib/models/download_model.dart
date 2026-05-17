@@ -72,13 +72,8 @@ class QualityOption extends HiveObject {
     return '${(sizeBytes / (1024 * 1024 * 1024)).toStringAsFixed(2)} GB';
   }
 
-  String get magnet =>
-      'magnet:?xt=urn:btih:$hash'
-      '&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce'
-      '&tr=udp%3A%2F%2Ftracker.openbittorrent.com%3A6969%2Fannounce'
-      '&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce'
-      '&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce'
-      '&tr=udp%3A%2F%2Ftracker.leechers-paradise.org%3A6969%2Fannounce';
+  // magnet getter removed — torrent engine was removed from the app.
+  // Torrentio provides infoHash which is resolved via Webtor.io to HTTP.
 }
 
 // ─── Download Task ────────────────────────────────────────────────────────────
@@ -107,6 +102,8 @@ class DownloadTask extends HiveObject {
   @HiveField(19) String source;          // 'torrent' or 'telegram'
   @HiveField(20) int? telegramFileId;    // TDLib file ID for telegram downloads
   @HiveField(21) double downloadSpeed;   // bytes/sec — for UI display
+  @HiveField(22) int retryCount;         // number of retry attempts so far
+  @HiveField(23) String? httpStreamUrl;   // fallback HTTP stream URL (Torrentio/VegaMovies)
 
   DownloadTask({
     required this.id,
@@ -131,6 +128,8 @@ class DownloadTask extends HiveObject {
     this.source = 'telegram',
     this.telegramFileId,
     this.downloadSpeed = 0,
+    this.retryCount = 0,
+    this.httpStreamUrl,
   });
 
   // Human-readable display title
