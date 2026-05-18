@@ -247,6 +247,7 @@ class DownloadService extends ChangeNotifier {
       season: season, episode: episode, episodeName: episodeName,
       quality: quality, posterPath: posterPath, source: 'stream',
       createdAt: DateTime.now(), status: DownloadStatus.downloading,
+      httpStreamUrl: streamUrl, // persisted so pause/resume can use Range header
     );
     await _box.put(id, task);
     _scheduleNotify();
@@ -406,8 +407,18 @@ class DownloadService extends ChangeNotifier {
     final task = _box.get(id);
     if (task == null || task.status != DownloadStatus.paused) return;
 
+    // HTTP source (VegaMovies / Torrentio / stream download) — resume with Range header
+    if (task.httpStreamUrl != null && task.httpStreamUrl!.isNotEmpty) {
+      task.status = DownloadStatus.downloading;
+      await task.save();
+      _scheduleNotify();
+      _processHttpDownload(task, task.httpStreamUrl!, const {});
+      return;
+    }
+
+    // Telegram source
     if (task.telegramFileId == null || telegramService == null) {
-      await _failTask(task, 'Telegram file ID missing — re-download needed');
+      await _failTask(task, 'No download source available — re-download needed');
       return;
     }
     task.status = DownloadStatus.downloading;
@@ -600,15 +611,22 @@ class DownloadService extends ChangeNotifier {
   }
 
   void _requeue(DownloadTask task) async {
+    // Priority 1: Telegram CDN
     if (task.telegramFileId != null && telegramService != null) {
       await _updateTask(task, status: DownloadStatus.downloading);
       telegramService!.downloadFile(task.telegramFileId!).catchError((e) async {
         await _failTask(task, 'Telegram re-queue failed: $e');
         return '';
       });
-    } else {
-      await _failTask(task, 'Telegram source unavailable — file ID missing');
+      return;
     }
+    // Priority 2: HTTP stream (VegaMovies / Torrentio)
+    if (task.httpStreamUrl != null && task.httpStreamUrl!.isNotEmpty) {
+      await _updateTask(task, status: DownloadStatus.downloading);
+      _processHttpDownload(task, task.httpStreamUrl!, const {});
+      return;
+    }
+    await _failTask(task, 'No download source available');
   }
 
   // ── Helpers ───────────────────────────────────────────────────────────────

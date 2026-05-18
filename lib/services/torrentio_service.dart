@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:http/http.dart' as http;
 import 'stream_extractor_service.dart';
 
@@ -145,6 +146,7 @@ class TorrentioService {
   static const _timeout = Duration(seconds: 8);
 
   /// Fetch torrent sources from Torrentio for a movie or episode.
+  /// Tries the Cloudflare worker proxy first (avoids mobile CORS), then direct API.
   Future<List<TorrentioSource>> fetchSources({
     required String imdbId,
     required String type, // 'movie' or 'tv'
@@ -153,9 +155,37 @@ class TorrentioService {
   }) async {
     if (imdbId.isEmpty) return [];
 
-    // Build Stremio addon endpoint
-    // Movie:  /stream/movie/{imdbId}.json
-    // Series: /stream/series/{imdbId}:{season}:{episode}.json
+    // Try via Cloudflare worker proxy first (avoids CORS + mobile network blocks)
+    final workerUrl = dotenv.env['EXTRACTOR_WORKER_URL'] ?? '';
+    if (workerUrl.isNotEmpty) {
+      try {
+        final params = <String, String>{
+          'imdb': imdbId,
+          'type': type == 'tv' ? 'series' : 'movie',
+          if (type == 'tv') 'season': '$season',
+          if (type == 'tv') 'episode': '$episode',
+        };
+        final uri = Uri.parse('$workerUrl/torrentio/streams').replace(queryParameters: params);
+        final res = await http.get(uri, headers: {'User-Agent': _ua}).timeout(_timeout);
+        if (res.statusCode == 200) {
+          final body = jsonDecode(res.body) as Map<String, dynamic>;
+          final streams = body['streams'] as List? ?? [];
+          final sources = streams
+              .map((s) => TorrentioSource.fromJson(s as Map<String, dynamic>))
+              .where((s) => s.infoHash != null && s.infoHash!.isNotEmpty)
+              .toList()
+            ..sort((a, b) => b.sortScore.compareTo(a.sortScore));
+          if (sources.isNotEmpty) {
+            debugPrint('[Torrentio] Found ${sources.length} sources via worker proxy for $imdbId');
+            return sources;
+          }
+        }
+      } catch (e) {
+        debugPrint('[Torrentio] Worker proxy failed, trying direct: $e');
+      }
+    }
+
+    // Fallback: direct Torrentio API call
     final String endpoint;
     if (type == 'movie') {
       endpoint = '$_torrentioBase/stream/movie/$imdbId.json';
@@ -166,10 +196,7 @@ class TorrentioService {
     try {
       final res = await http.get(
         Uri.parse(endpoint),
-        headers: {
-          'User-Agent': _ua,
-          'Accept': 'application/json',
-        },
+        headers: { 'User-Agent': _ua, 'Accept': 'application/json' },
       ).timeout(_timeout);
 
       if (res.statusCode != 200) {
@@ -186,7 +213,7 @@ class TorrentioService {
           .toList()
         ..sort((a, b) => b.sortScore.compareTo(a.sortScore));
 
-      debugPrint('[Torrentio] Found ${sources.length} sources for $imdbId');
+      debugPrint('[Torrentio] Found ${sources.length} sources (direct) for $imdbId');
       return sources;
     } catch (e) {
       debugPrint('[Torrentio] Error: $e');

@@ -703,7 +703,6 @@ class _QualityTile extends StatelessWidget {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final qualityColor = _getQualityColor(option.quality, cs);
-    final isTelegram = option.source == 'telegram';
 
     return ListTile(
       contentPadding: const EdgeInsets.symmetric(horizontal: AppSpacing.lg, vertical: AppSpacing.xs),
@@ -722,37 +721,32 @@ class _QualityTile extends StatelessWidget {
         ),
       ),
       title: Wrap(crossAxisAlignment: WrapCrossAlignment.center, children: [
-        // Source badge
-        Container(
-          margin: const EdgeInsets.only(right: AppSpacing.sm),
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-          decoration: BoxDecoration(
-            color: isTelegram
-                ? const Color(0xFF2AABEE).withAlpha(38)
-                : Colors.blue.withAlpha(30),
-            borderRadius: AppRadius.xsAll,
-            border: Border.all(
-              color: isTelegram
-                  ? const Color(0xFF2AABEE).withAlpha(102)
-                  : Colors.blue.withAlpha(76),
+        // Source badge — distinct for each provider type
+        Builder(builder: (context) {
+          final cs = Theme.of(context).colorScheme;
+          final src = option.source.toLowerCase();
+          final (emoji, label, color) = switch (src) {
+            'telegram'   => ('⚡', 'CDN', const Color(0xFF2AABEE)),
+            'torrent'    => ('🧲', 'P2P', Colors.green),
+            'vegamovies' => ('🎬', 'DDL', Colors.orange),
+            'stream'     => ('🔗', 'HTTP', Colors.purple),
+            _            => ('🔗', src.toUpperCase(), cs.onSurfaceVariant),
+          };
+          return Container(
+            margin: const EdgeInsets.only(right: AppSpacing.sm),
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            decoration: BoxDecoration(
+              color: color.withAlpha(30),
+              borderRadius: AppRadius.xsAll,
+              border: Border.all(color: color.withAlpha(100)),
             ),
-          ),
-          child: Row(mainAxisSize: MainAxisSize.min, children: [
-            Text(
-              isTelegram ? '⚡' : '🔗',
-              style: const TextStyle(fontSize: 9),
-            ),
-            const SizedBox(width: 3),
-            Text(
-              isTelegram ? 'CDN' : 'P2P',
-              style: TextStyle(
-                color: isTelegram ? const Color(0xFF2AABEE) : Colors.blue,
-                fontSize: 9,
-                fontWeight: FontWeight.w700,
-              ),
-            ),
-          ]),
-        ),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              Text(emoji, style: const TextStyle(fontSize: 9)),
+              const SizedBox(width: 3),
+              Text(label, style: TextStyle(color: color, fontSize: 9, fontWeight: FontWeight.w700)),
+            ]),
+          );
+        }),
         // Indexer / Channel name
         if (option.channelName != null && option.channelName!.isNotEmpty)
           Container(
@@ -802,14 +796,14 @@ class _QualityTile extends StatelessWidget {
               Text(option.audioChannels!,
                   style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12)),
             ],
-            if (!isTelegram && option.seeders > 0) ...[
+            if (option.source != 'telegram' && option.seeders > 0) ...[
               const SizedBox(width: AppSpacing.md),
               Icon(Icons.people_rounded, size: 12, color: cs.onSurfaceVariant),
               const SizedBox(width: 4),
               Text('${option.seeders}',
                   style: TextStyle(color: cs.onSurfaceVariant, fontSize: 12)),
             ],
-            if (isTelegram) ...[
+            if (option.source == 'telegram') ...[
               const SizedBox(width: AppSpacing.md),
               const Icon(Icons.bolt_rounded, size: 12, color: Color(0xFF2AABEE)),
               const SizedBox(width: 2),

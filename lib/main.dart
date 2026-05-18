@@ -30,10 +30,8 @@ import 'screens/telegram_channel_browser.dart';
 import 'screens/native_player_screen.dart';
 import 'theme/app_theme.dart';
 import 'widgets/responsive_layout.dart';
-import 'package:flutter_skill/flutter_skill.dart';
 
 void main() async {
-  FlutterSkillBinding.ensureInitialized();
   WidgetsFlutterBinding.ensureInitialized();
   MediaKit.ensureInitialized(); // ← native player init
   await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
