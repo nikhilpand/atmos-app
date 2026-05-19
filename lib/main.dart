@@ -58,11 +58,12 @@ void main() async {
   final recommendationService = RecommendationService();
   final watchlistService = WatchlistService();
   final tmdbService = TmdbService();
+  final seedNotifier = SeedColorNotifier();
 
   // We wrap the remaining initialization in a try-catch to guarantee that `runApp`
   // is called even if the local database is corrupted or SharedPreferences fails.
   bool onboardingDone = false;
-  DownloadSourceLabel savedSource = DownloadSourceLabel.vega;
+  DownloadSource savedSource = DownloadSource.telegram;
 
   try {
     // Initialize HistoryService first, as it calls Hive.initFlutter()
