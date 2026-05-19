@@ -1,0 +1,14 @@
+{
+  "name": "tg-search",
+  "version": "1.0.0",
+  "description": "Telegram MTProto global search — find any file across all public channels",
+  "type": "module",
+  "scripts": {
+    "search": "node search.mjs",
+    "auth": "node auth.mjs"
+  },
+  "dependencies": {
+    "telegram": "^2.26.8",
+    "input": "^1.0.1"
+  }
+}

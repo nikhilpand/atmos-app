@@ -1,0 +1,82 @@
+name: atmos
+description: Premium streaming app for Android Mobile & TV
+publish_to: 'none'
+version: 3.0.0+3
+
+environment:
+  sdk: '>=3.3.0 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # State Management
+  flutter_riverpod: ^2.5.1
+  riverpod_annotation: ^2.3.5
+
+  # Networking
+  http: ^1.2.1
+
+  # Image Caching
+  cached_network_image: ^3.3.1
+
+  # Local Storage (watch history + downloads)
+  hive_flutter: ^1.1.0
+  hive: ^2.2.3
+
+  # Navigation
+  go_router: ^14.2.0
+
+  # Utils
+  flutter_dotenv: ^5.1.0
+  intl: ^0.19.0
+  shimmer: ^3.0.0
+  google_fonts: ^6.2.1
+  flutter_animate: ^4.5.0
+  path_provider: ^2.1.3
+  shared_preferences: ^2.2.3
+  url_launcher: ^6.3.0
+  connectivity_plus: ^6.0.3
+  package_info_plus: ^8.1.2
+
+
+  # ─── Download Engine ──────────────────────────────────────────────────────
+  # Torrent engine removed — Telegram CDN is the sole download source now
+
+  # Storage permissions (Android 11+)
+  permission_handler: ^11.3.1
+
+  # Foreground service (keeps torrent engine alive in background)
+  flutter_foreground_task: ^8.14.0
+
+  # TDLib bindings for Android — native MTProto client for global search + CDN downloads
+  handy_tdlib: ^2.3.10
+
+  # Crash Reporting & Analytics (latest — compatible with Kotlin 2.x AGP)
+  sentry_flutter: ^9.0.0
+  posthog_flutter: ^5.0.0
+
+  # ─── Native Player (media_kit / mpv-based) ───────────────────────────────────
+  # Core playback engine — hardware decoding, PiP, HLS, DASH, MP4, MKV
+  media_kit: ^1.1.11
+  media_kit_video: ^1.2.4
+  # Android native codec libs (required for Android playback)
+  media_kit_libs_android_video: ^1.3.2
+  screen_brightness: ^2.1.8
+  volume_controller: ^3.4.4
+  wakelock_plus: ^1.3.3
+
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^3.0.0
+  build_runner: ^2.4.9
+  riverpod_generator: ^2.4.0
+  hive_generator: ^2.0.1
+  mocktail: ^1.0.4
+
+flutter:
+  uses-material-design: true
+  assets:
+    - .env
