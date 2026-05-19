@@ -2368,7 +2368,7 @@ class _ToggleTile extends StatelessWidget {
             fontWeight: value ? FontWeight.w600 : FontWeight.w400,
           )),
         value: value,
-        activeThumbColor: cs.primary,
+        activeColor: cs.primary,
         onChanged: onChanged,
       ),
     );
