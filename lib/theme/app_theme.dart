@@ -259,7 +259,6 @@ class AtmosTheme {
           TargetPlatform.android: ZoomPageTransitionsBuilder(
             allowEnterRouteSnapshotting: false,
           ),
-          TargetPlatform.iOS: CupertinoPageTransitionsBuilder(),
         },
       ),
     );

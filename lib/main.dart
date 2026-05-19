@@ -59,41 +59,49 @@ void main() async {
   final watchlistService = WatchlistService();
   final tmdbService = TmdbService();
 
-  // Initialize HistoryService first, as it calls Hive.initFlutter()
-  // which must complete before other services try to open boxes.
-  await historyService.init();
+  // We wrap the remaining initialization in a try-catch to guarantee that `runApp`
+  // is called even if the local database is corrupted or SharedPreferences fails.
+  bool onboardingDone = false;
+  DownloadSourceLabel savedSource = DownloadSourceLabel.vega;
 
-  // Parallelize remaining IO and local database inits
-  await Future.wait([
-    downloadService.init(downloadDir),
-    recommendationService.init(),
-    watchlistService.init(),
-    tmdbService.initCache(),
-  ]);
+  try {
+    // Initialize HistoryService first, as it calls Hive.initFlutter()
+    // which must complete before other services try to open boxes.
+    await historyService.init();
 
-  // Telegram init touches network/TDLib and blocks. Push it to background.
-  telegramService.init().then((_) {
-    telegramService.whenReady.timeout(const Duration(seconds: 5)).catchError((e) {
-      debugPrint('[Main] Telegram service ready timeout or error: $e');
+    // Parallelize remaining IO and local database inits
+    await Future.wait([
+      downloadService.init(downloadDir),
+      recommendationService.init(),
+      watchlistService.init(),
+      tmdbService.initCache(),
+    ]);
+
+    // Telegram init touches network/TDLib and blocks. Push it to background.
+    telegramService.init().then((_) {
+      telegramService.whenReady.timeout(const Duration(seconds: 5)).catchError((e) {
+        debugPrint('[Main] Telegram service ready timeout or error: $e');
+      });
     });
-  });
 
-  downloadService.telegramService = telegramService;
-  telegramService.addListener(() {
-    for (final progress in telegramService.activeDownloads.values) {
-      downloadService.syncTelegramProgress(
-        progress.fileId, progress.progress,
-        progress.downloadedBytes, progress.isComplete, progress.localPath,
-      );
-    }
-  });
+    downloadService.telegramService = telegramService;
+    telegramService.addListener(() {
+      for (final progress in telegramService.activeDownloads.values) {
+        downloadService.syncTelegramProgress(
+          progress.fileId, progress.progress,
+          progress.downloadedBytes, progress.isComplete, progress.localPath,
+        );
+      }
+    });
 
-  final prefs = await SharedPreferences.getInstance();
-  final savedSource = DownloadSourceLabel.fromString(prefs.getString('dl_source'));
-  final onboardingDone = prefs.getBool('onboarding_done') ?? false;
+    final prefs = await SharedPreferences.getInstance();
+    savedSource = DownloadSourceLabel.fromString(prefs.getString('dl_source'));
+    onboardingDone = prefs.getBool('onboarding_done') ?? false;
 
-  final seedNotifier = SeedColorNotifier();
-  await seedNotifier.load();
+    await seedNotifier.load();
+  } catch (e, stack) {
+    debugPrint('Critical initialization error: $e\n$stack');
+  }
 
   // Wrap runApp with Sentry
   await SentryFlutter.init(

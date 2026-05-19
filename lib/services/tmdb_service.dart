@@ -18,7 +18,14 @@ class _TmdbCache {
 
   Future<void> init() async {
     if (_ready) return;
-    _box = await Hive.openBox(_boxName);
+    try {
+      _box = await Hive.openBox(_boxName);
+    } catch (e) {
+      // debugPrint('TMDB cache box corrupted, deleting: $e'); // no flutter/foundation import here, can't debugPrint easily, so just print
+      print('TMDB cache box corrupted, deleting: $e');
+      await Hive.deleteBoxFromDisk(_boxName);
+      _box = await Hive.openBox(_boxName);
+    }
     _ready = true;
   }
 

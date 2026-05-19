@@ -41,7 +41,13 @@ class DownloadService extends ChangeNotifier {
     if (!Hive.isAdapterRegistered(12)) {
       Hive.registerAdapter(DownloadTaskAdapter());
     }
-    _box = await Hive.openBox<DownloadTask>(_boxName);
+    try {
+      _box = await Hive.openBox<DownloadTask>(_boxName);
+    } catch (e) {
+      debugPrint('Download box corrupted, deleting: $e');
+      await Hive.deleteBoxFromDisk(_boxName);
+      _box = await Hive.openBox<DownloadTask>(_boxName);
+    }
 
     // Load persisted settings
     final prefs = await SharedPreferences.getInstance();

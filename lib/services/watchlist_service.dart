@@ -12,7 +12,13 @@ class WatchlistService extends ChangeNotifier {
 
   Future<void> init() async {
     if (_initialized) return;
-    _box = await Hive.openBox<Map>(_boxName);
+    try {
+      _box = await Hive.openBox<Map>(_boxName);
+    } catch (e) {
+      debugPrint('Watchlist box corrupted, deleting: $e');
+      await Hive.deleteBoxFromDisk(_boxName);
+      _box = await Hive.openBox<Map>(_boxName);
+    }
     _initialized = true;
   }
 

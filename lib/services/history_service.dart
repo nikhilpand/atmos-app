@@ -10,7 +10,13 @@ class HistoryService {
     if (!Hive.isAdapterRegistered(0)) {
       Hive.registerAdapter(WatchHistoryAdapter());
     }
-    _box = await Hive.openBox<WatchHistory>(_boxName);
+    try {
+      _box = await Hive.openBox<WatchHistory>(_boxName);
+    } catch (e) {
+      debugPrint('History box corrupted, deleting: $e');
+      await Hive.deleteBoxFromDisk(_boxName);
+      _box = await Hive.openBox<WatchHistory>(_boxName);
+    }
   }
 
   /// Save or update watch progress for a movie or episode.
