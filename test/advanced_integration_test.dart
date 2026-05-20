@@ -187,37 +187,88 @@ void main() {
     }
 
     // ignore: avoid_print
-    print('\n\n╔══════════════════════════════════════════════════════╗');
+    print('\n\n========================================================');
     // ignore: avoid_print
-    print('║   ADVANCED INTEGRATION TEST — FINAL REPORT           ║');
+    print('   ADVANCED INTEGRATION TEST — FINAL REPORT');
     // ignore: avoid_print
-    print('╠══════════════════════════════════════════════════════╣');
+    print('========================================================');
     // ignore: avoid_print
-    print('║  Total: ${_all.length}  ✅ ${pass}  ❌ ${fail}  ⚠️ ${skip}  Rate: ${(_all.isEmpty ? 0 : pass / _all.length * 100).toStringAsFixed(1)}%'.padRight(55) + '║');
+    print('Total: ${_all.length} | ✅ Pass: $pass | ❌ Fail: $fail | ⚠️ Skip: $skip | Rate: ${(_all.isEmpty ? 0 : pass / _all.length * 100).toStringAsFixed(1)}%');
     // ignore: avoid_print
-    print('╠══════════════════════════════════════════════════════╣');
+    print('--------------------------------------------------------');
     for (final g in byGroup.keys.toList()..sort()) {
       final m = byGroup[g]!;
       // ignore: avoid_print
-      print('║  $g → ✅${m['pass']} ❌${m['fail']} ⚠️${m['skip']}'.padRight(55) + '║');
+      print('  $g → ✅ ${m['pass']}  ❌ ${m['fail']}  ⚠️ ${m['skip']}');
     }
-    // ignore: avoid_print
-    print('╠══════════════════════════════════════════════════════╣');
+
+    // 1. FAILURES DETAILS (UNTRUNCATED)
     final failures = _all.where((r) => r.s == _S.fail).toList();
     if (failures.isNotEmpty) {
       // ignore: avoid_print
-      print('║  FAILURES:'.padRight(55) + '║');
+      print('\n❌ FAILURES DETAILS (${failures.length}):');
+      // ignore: avoid_print
+      print('--------------------------------------------------------');
       for (final f in failures) {
         // ignore: avoid_print
-        print('║    ${f.g} | ${f.t}'.padRight(55) + '║');
-        if (f.d != null) {
+        print('  [FAIL] ${f.g} | ${f.t} (${f.e.inMilliseconds}ms)');
+        if (f.d != null && f.d!.isNotEmpty) {
           // ignore: avoid_print
-          print('║      ${f.d!.substring(0, f.d!.length.clamp(0, 49))}'.padRight(55) + '║');
+          print('         Detail: ${f.d}');
         }
       }
     }
+
+    // 2. SKIPS & WARNINGS DETAILS (UNTRUNCATED)
+    final skips = _all.where((r) => r.s == _S.skip).toList();
+    if (skips.isNotEmpty) {
+      // ignore: avoid_print
+      print('\n⚠️ SKIPS / WARNINGS DETAILS (${skips.length}):');
+      // ignore: avoid_print
+      print('--------------------------------------------------------');
+      for (final sk in skips) {
+        // ignore: avoid_print
+        print('  [SKIP] ${sk.g} | ${sk.t} (${sk.e.inMilliseconds}ms)');
+        if (sk.d != null && sk.d!.isNotEmpty) {
+          // ignore: avoid_print
+          print('         Detail: ${sk.d}');
+        }
+      }
+    }
+
+    // 3. PERFORMANCE AUDIT (TOP 10 SLOWEST TESTS)
+    final sortedByTime = List<_R>.from(_all)..sort((a, b) => b.e.compareTo(a.e));
+    final slowest = sortedByTime.take(10).toList();
     // ignore: avoid_print
-    print('╚══════════════════════════════════════════════════════╝\n');
+    print('\n⏱️ PERFORMANCE AUDIT — TOP 10 SLOWEST TESTS:');
+    // ignore: avoid_print
+    print('--------------------------------------------------------');
+    for (int i = 0; i < slowest.length; i++) {
+      final r = slowest[i];
+      final statusStr = r.s == _S.pass ? '✅' : r.s == _S.skip ? '⚠️' : '❌';
+      // ignore: avoid_print
+      print('  #${i + 1} [$statusStr] ${r.e.inMilliseconds}ms — ${r.g} | ${r.t}');
+    }
+
+    // 4. GROUP PERFORMANCE SUMMARY
+    // ignore: avoid_print
+    print('\n📊 GROUP AVERAGE LATENCIES:');
+    // ignore: avoid_print
+    print('--------------------------------------------------------');
+    final groupLatencies = <String, List<int>>{};
+    for (final r in _all) {
+      groupLatencies.putIfAbsent(r.g, () => []);
+      groupLatencies[r.g]!.add(r.e.inMilliseconds);
+    }
+    for (final g in groupLatencies.keys.toList()..sort()) {
+      final times = groupLatencies[g]!;
+      final avg = times.reduce((a, b) => a + b) / times.length;
+      final max = times.reduce((a, b) => a > b ? a : b);
+      // ignore: avoid_print
+      print('  $g → Average: ${avg.toStringAsFixed(1)}ms | Max: ${max}ms');
+    }
+    // ignore: avoid_print
+    print('========================================================\n');
   });
 
   // ═══════════════════════════════════════════════════════════════════════════
