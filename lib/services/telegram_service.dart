@@ -399,8 +399,8 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
         minDate: 0,
         maxDate: 0,
       ), extra: id);
-      // 20 s timeout — complete with empty list if TDLib never responds
-      return c.future.timeout(const Duration(seconds: 20), onTimeout: () {
+      // 8 s timeout — complete with empty list if TDLib never responds
+      return c.future.timeout(const Duration(seconds: 8), onTimeout: () {
         _pendingSearches.remove(id);
         return [];
       });
@@ -705,7 +705,7 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
 
   void _handleSearchResults(td.FoundMessages found, {int? extraId}) {
     const minBytes = 50 * 1024 * 1024;                 // 50 MB — skip trailers / fakes
-    const maxBytes = 5 * 1024 * 1024 * 1024;             //  5 GB — explicit int (safe on all platforms)
+    const maxBytes = 3 * 1024 * 1024 * 1024;             //  3 GB — explicit int (safe on all platforms)
 
     final results = <TelegramSearchResult>[];
     
@@ -810,6 +810,7 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
 
     final list = <TelegramSearchResult>[];
     const minBytes = 50 * 1024 * 1024; // 50 MB
+    const maxBytes = 3 * 1024 * 1024 * 1024; // 3 GB
 
     for (final r in results.results) {
       td.Video? video;
@@ -837,8 +838,14 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
 
       if (fileId == 0) continue;
       if (fileSize < minBytes) continue;
+      if (fileSize > maxBytes) continue;
 
       final quality = _parseQuality(fileName, caption);
+      final qLower  = quality.toLowerCase();
+      if (qLower.contains('4k') || qLower.contains('2160') ||
+          qLower.contains('uhd') || qLower.contains('dv')) {
+        continue;
+      }
       final codec = _parseVideoCodec(fileName, caption);
       final audio = _parseAudio(fileName, caption);
       final partInfo = _detectMultiPart(fileName, caption);
@@ -980,7 +987,7 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
       extra: id,
     );
 
-    return c.future.timeout(const Duration(seconds: 12), onTimeout: () {
+    return c.future.timeout(const Duration(seconds: 6), onTimeout: () {
       _pendingInlineQueries.remove(id);
       return [];
     });
