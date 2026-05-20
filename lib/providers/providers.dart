@@ -15,9 +15,16 @@ import '../services/stream_extractor_service.dart';
 import '../services/torrentio_service.dart';
 import '../services/vegamovies_service.dart';
 import '../services/stremio_addon_service.dart';
+import '../services/torrent_cache_service.dart';
+import '../services/gemini_ai_service.dart';
 import '../theme/app_tokens.dart';
 
 // ─── Core Service Providers ───────────────────────────────────────────────────
+
+final torrentCacheServiceProvider = Provider<TorrentCacheService>((ref) => TorrentCacheService());
+
+final geminiAiServiceProvider = Provider<GeminiAiService>((ref) => GeminiAiService());
+
 
 final tmdbServiceProvider = Provider<TmdbService>((ref) => TmdbService());
 
@@ -154,6 +161,16 @@ final genreContentProvider = FutureProvider.family<List<TmdbMedia>,
   );
 });
 
+/// Fetch content for a specific Gemini AI category.
+final geminiCategoryContentProvider = FutureProvider.family<List<TmdbMedia>,
+    ({List<int> genreIds, String sortBy, MediaType type})>((ref, params) {
+  return ref.watch(tmdbServiceProvider).discoverByGenres(
+    params.genreIds,
+    type: params.type,
+    sortBy: params.sortBy,
+  );
+});
+
 // ─── Recommendations ─────────────────────────────────────────────────────────
 
 /// TMDB recommendations for a specific title (used in Details + Watch Next row).
@@ -186,6 +203,109 @@ final forYouProvider = FutureProvider<List<TmdbMedia>>((ref) async {
   final recs = ref.watch(recommendationServiceProvider);
   final tmdb = ref.watch(tmdbServiceProvider);
   return recs.getPersonalizedRow(tmdb);
+});
+
+/// Gemini AI recommendations.
+final geminiRecommendationsProvider = FutureProvider<List<TmdbMedia>>((ref) async {
+  final gemini = ref.watch(geminiAiServiceProvider);
+  final history = ref.watch(historyServiceProvider);
+  final recs = ref.watch(recommendationServiceProvider);
+  final tmdb = ref.watch(tmdbServiceProvider);
+
+  final configured = await gemini.isGeminiConfigured();
+  if (!configured) return const [];
+
+  final watchHistoryList = history.getHistory().map((item) => {
+    'title': item.title,
+    'type': item.mediaType,
+  }).toList();
+
+  final preferredGenres = recs.topGenreIds.map((id) {
+    final g = TmdbService.movieGenres[id] ?? TmdbService.tvGenres[id];
+    return g?.name ?? '';
+  }).where((name) => name.isNotEmpty).toList();
+
+  final aiRecs = await gemini.getRecommendations(
+    watchHistory: watchHistoryList,
+    searchHistory: const [],
+    preferredGenres: preferredGenres,
+  );
+
+  if (aiRecs.isEmpty) return const [];
+
+  // Resolve tmdbIds or search by title in parallel
+  final resolvedList = <TmdbMedia>[];
+  final futures = aiRecs.map((rec) async {
+    try {
+      if (rec.tmdbId > 0) {
+        if (rec.type == 'movie') {
+          final detail = await tmdb.getMovieDetails(rec.tmdbId);
+          return TmdbMedia(
+            id: detail.id,
+            title: detail.title,
+            posterPath: detail.posterPath,
+            backdropPath: detail.backdropPath,
+            mediaType: MediaType.movie,
+            releaseDate: detail.releaseDate,
+            voteAverage: detail.voteAverage,
+            overview: detail.overview,
+          );
+        } else {
+          final detail = await tmdb.getTvDetails(rec.tmdbId);
+          return TmdbMedia(
+            id: detail.id,
+            title: detail.title,
+            posterPath: detail.posterPath,
+            backdropPath: detail.backdropPath,
+            mediaType: MediaType.tv,
+            releaseDate: detail.releaseDate,
+            voteAverage: detail.voteAverage,
+            overview: detail.overview,
+          );
+        }
+      } else {
+        // Search by title
+        final searchResults = await tmdb.search(rec.title);
+        if (searchResults.isNotEmpty) {
+          return searchResults.first;
+        }
+      }
+    } catch (e) {
+      debugPrint('Failed resolving AI recommendation ${rec.title}: $e');
+    }
+    return null;
+  });
+
+  final results = await Future.wait(futures);
+  for (final m in results) {
+    if (m != null) resolvedList.add(m);
+  }
+  return resolvedList;
+});
+
+/// Gemini AI categories.
+final geminiCategoriesProvider = FutureProvider<List<GeminiCategory>>((ref) async {
+  final gemini = ref.watch(geminiAiServiceProvider);
+  final history = ref.watch(historyServiceProvider);
+  final recs = ref.watch(recommendationServiceProvider);
+
+  final configured = await gemini.isGeminiConfigured();
+  if (!configured) return const [];
+
+  final watchHistoryList = history.getHistory().map((item) => {
+    'title': item.title,
+    'type': item.mediaType,
+  }).toList();
+
+  final preferredGenres = recs.topGenreIds.map((id) {
+    final g = TmdbService.movieGenres[id] ?? TmdbService.tvGenres[id];
+    return g?.name ?? '';
+  }).where((name) => name.isNotEmpty).toList();
+
+  return gemini.getCategories(
+    watchHistory: watchHistoryList,
+    preferredGenres: preferredGenres,
+  );
 });
 
 // ─── Watch History ────────────────────────────────────────────────────────────

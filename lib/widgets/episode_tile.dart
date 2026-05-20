@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import '../models/media_model.dart';
+import '../models/download_model.dart';
 import '../theme/app_theme.dart';
 import '../theme/app_tokens.dart';
 
@@ -10,6 +11,7 @@ class EpisodeTile extends StatefulWidget {
   final WatchHistory? watchHistory;
   final VoidCallback onTap;
   final VoidCallback? onDownload;
+  final DownloadStatus? downloadStatus;
 
   const EpisodeTile({
     super.key,
@@ -18,6 +20,7 @@ class EpisodeTile extends StatefulWidget {
     this.isSelected = false,
     this.watchHistory,
     this.onDownload,
+    this.downloadStatus,
   });
 
   @override
@@ -123,12 +126,47 @@ class _EpisodeTileState extends State<EpisodeTile> {
                   // Download button
                   if (widget.onDownload != null) ...[
                     IconButton(
-                      icon: const Icon(Icons.download_rounded, size: 20),
-                      color: Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
+                      icon: Icon(
+                        widget.downloadStatus == DownloadStatus.completed
+                            ? Icons.download_done_rounded
+                            : (widget.downloadStatus == DownloadStatus.downloading ||
+                                    widget.downloadStatus == DownloadStatus.queued ||
+                                    widget.downloadStatus == DownloadStatus.searching ||
+                                    widget.downloadStatus == DownloadStatus.converting)
+                                ? Icons.downloading_rounded
+                                : widget.downloadStatus == DownloadStatus.failed
+                                    ? Icons.error_outline_rounded
+                                    : Icons.download_rounded,
+                        size: 20,
+                      ),
+                      color: widget.downloadStatus == DownloadStatus.completed
+                          ? Colors.green
+                          : (widget.downloadStatus == DownloadStatus.downloading ||
+                                  widget.downloadStatus == DownloadStatus.queued ||
+                                  widget.downloadStatus == DownloadStatus.searching ||
+                                  widget.downloadStatus == DownloadStatus.converting)
+                              ? Theme.of(context).colorScheme.primary
+                              : widget.downloadStatus == DownloadStatus.failed
+                                  ? Colors.red
+                                  : Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
                       padding: EdgeInsets.zero,
                       constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-                      onPressed: widget.onDownload,
-                      tooltip: 'Download',
+                      onPressed: widget.downloadStatus == DownloadStatus.completed
+                          ? () {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                const SnackBar(
+                                  content: Text('Episode already downloaded 💾'),
+                                  behavior: SnackBarBehavior.floating,
+                                  duration: Duration(seconds: 2),
+                                ),
+                              );
+                            }
+                          : widget.onDownload,
+                      tooltip: widget.downloadStatus == DownloadStatus.completed
+                          ? 'Downloaded'
+                          : widget.downloadStatus == DownloadStatus.downloading
+                              ? 'Downloading...'
+                              : 'Download',
                     ),
                   ],
                   // Play icon or checkmark

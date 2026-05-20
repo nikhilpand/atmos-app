@@ -4,6 +4,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:go_router/go_router.dart';
 import 'package:url_launcher/url_launcher.dart';
 import 'package:flutter_animate/flutter_animate.dart';
+import 'package:collection/collection.dart';
 import '../models/media_model.dart';
 import '../models/download_model.dart';
 import '../providers/providers.dart';
@@ -433,13 +434,23 @@ class _PlayButtonState extends ConsumerState<_PlayButton> {
   void _onPlay() async {
     // Build the args map for both players
     final Map<String, dynamic> baseArgs;
+    final dl = ref.read(downloadServiceProvider);
+
     if (widget.details.mediaType == MediaType.movie) {
+      final dlTask = dl.allTasks.firstWhereOrNull(
+          (t) => t.tmdbId == widget.details.id && t.mediaType == 'movie' && t.status == DownloadStatus.completed);
+      final hasLocal = dlTask != null && dlTask.filePath != null && dlTask.filePath!.isNotEmpty;
+
       baseArgs = {
         'imdbId': widget.details.imdbId ?? '',
         'tmdbId': widget.details.id,
         'title': widget.details.title,
         'posterPath': widget.details.posterPath ?? '',
         'type': 'movie',
+        if (hasLocal) ...{
+          'isLocal': true,
+          'localPath': dlTask.filePath,
+        }
       };
     } else {
       final seasons = widget.details.seasons;
@@ -448,6 +459,14 @@ class _PlayButtonState extends ConsumerState<_PlayButton> {
               orElse: () => seasons.first)
           : null;
       if (firstSeason == null) return;
+
+      final dlTask = dl.allTasks.firstWhereOrNull((t) =>
+          t.tmdbId == widget.details.id &&
+          t.season == firstSeason.seasonNumber &&
+          t.episode == 1 &&
+          t.status == DownloadStatus.completed);
+      final hasLocal = dlTask != null && dlTask.filePath != null && dlTask.filePath!.isNotEmpty;
+
       baseArgs = {
         'imdbId': widget.details.imdbId ?? '',
         'tmdbId': widget.details.id,
@@ -457,6 +476,10 @@ class _PlayButtonState extends ConsumerState<_PlayButton> {
         'season': firstSeason.seasonNumber,
         'episode': 1,
         'episodeName': '',
+        if (hasLocal) ...{
+          'isLocal': true,
+          'localPath': dlTask.filePath,
+        }
       };
     }
 
@@ -466,6 +489,18 @@ class _PlayButtonState extends ConsumerState<_PlayButton> {
   }
 
   void _onDownload() async {
+    final telegram = ref.read(telegramServiceProvider);
+    if (!telegram.isLoggedIn) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Log in to Telegram in Settings to download'),
+          backgroundColor: Colors.orange,
+        ),
+      );
+      return;
+    }
+
     // ── Step 1: Show quality/audio filter picker ──────────────────────────
     final filters = await DownloadFilterSheet.show(
       context,
@@ -475,29 +510,26 @@ class _PlayButtonState extends ConsumerState<_PlayButton> {
 
     setState(() => _loadingDownload = true);
     try {
-      final telegram = ref.read(telegramServiceProvider);
-
       // ── Step 2: Build search futures (quality hint appended to Telegram query)
       final futures = <Future<List<QualityOption>>>[];
 
-      if (telegram.isLoggedIn) {
-        // Append filter hints so TDLib search is more precise
-        final hint = filters.searchHint;
-        final queryTitle = hint.isNotEmpty
-            ? '${widget.details.title} $hint'
-            : widget.details.title;
-        futures.add(
-          telegram.searchVideos(
-            queryTitle,
-            year: widget.details.releaseDate != null
-                ? int.tryParse(widget.details.releaseDate!.split('-').first)
-                : null,
-            mediaType: widget.details.mediaType == MediaType.movie ? 'movie' : 'tv',
-            // Pass language preference so ranking boosts user's chosen language
-            preferLang: filters.hasLanguageFilter ? filters.language.token : null,
-          ).then((results) => telegram.toQualityOptions(results)),
-        );
-      }
+      // Append filter hints so TDLib search is more precise
+      final hint = filters.searchHint;
+      final queryTitle = hint.isNotEmpty
+          ? '${widget.details.title} $hint'
+          : widget.details.title;
+      futures.add(
+        telegram.searchVideos(
+          queryTitle,
+          year: widget.details.releaseDate != null
+              ? int.tryParse(widget.details.releaseDate!.split('-').first)
+              : null,
+          mediaType: widget.details.mediaType == MediaType.movie ? 'movie' : 'tv',
+          // Pass language preference so ranking boosts user's chosen language
+          preferLang: filters.hasLanguageFilter ? filters.language.token : null,
+          baseTitle: widget.details.title,
+        ).then((results) => telegram.toQualityOptions(results)),
+      );
 
       if (futures.isEmpty) {
         if (!mounted) return;
@@ -590,6 +622,12 @@ class _PlayButtonState extends ConsumerState<_PlayButton> {
     final cs = Theme.of(context).colorScheme;
     final isMovie = widget.details.mediaType == MediaType.movie;
     final history = ref.watch(historyServiceProvider);
+    final dl = ref.watch(downloadServiceProvider);
+    final movieTask = isMovie
+        ? dl.allTasks.firstWhereOrNull((t) => t.tmdbId == widget.details.id && t.mediaType == 'movie')
+        : null;
+    final downloadStatus = movieTask?.status;
+
     final imdbId = widget.details.imdbId ?? '';
     final saved = imdbId.isNotEmpty
         ? history.getProgress(imdbId)
@@ -649,24 +687,79 @@ class _PlayButtonState extends ConsumerState<_PlayButton> {
                 ),
               ),
               if (isMovie) ...[
-                ElevatedButton.icon(
-                  onPressed: _loadingDownload ? null : _onDownload,
-                  icon: _loadingDownload
-                      ? const SizedBox(
-                          width: 18, height: 18,
-                          child: CircularProgressIndicator(
-                              strokeWidth: 2, color: Colors.white))
-                      : const Icon(Icons.download_rounded, size: 20),
-                  label: const Text('Download',
-                      style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: cs.surfaceContainer,
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
-                    side: BorderSide(color: cs.primary.withValues(alpha: 0.4)),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                  ),
-                ),
+                Builder(builder: (context) {
+                  final String label;
+                  final Widget icon;
+                  final VoidCallback? onPressed;
+                  final Color? foregroundColor;
+                  final Color? backgroundColor;
+
+                  if (downloadStatus == DownloadStatus.completed) {
+                    label = 'Downloaded';
+                    icon = const Icon(Icons.download_done_rounded, size: 20, color: Colors.green);
+                    foregroundColor = Colors.green;
+                    backgroundColor = cs.surfaceContainer;
+                    onPressed = () {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text('Movie already downloaded 💾'),
+                          behavior: SnackBarBehavior.floating,
+                          duration: Duration(seconds: 2),
+                        ),
+                      );
+                    };
+                  } else if (downloadStatus == DownloadStatus.downloading ||
+                      downloadStatus == DownloadStatus.queued ||
+                      downloadStatus == DownloadStatus.searching ||
+                      downloadStatus == DownloadStatus.converting) {
+                    label = 'Downloading';
+                    icon = const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2, color: Colors.blue),
+                    );
+                    foregroundColor = Colors.blue;
+                    backgroundColor = cs.surfaceContainer;
+                    onPressed = () {
+                      context.push('/downloads');
+                    };
+                  } else if (downloadStatus == DownloadStatus.failed) {
+                    label = 'Retry';
+                    icon = const Icon(Icons.error_outline_rounded, size: 20, color: Colors.red);
+                    foregroundColor = Colors.red;
+                    backgroundColor = cs.surfaceContainer;
+                    onPressed = () {
+                      if (movieTask != null) {
+                        dl.retryTask(movieTask.id);
+                      }
+                    };
+                  } else {
+                    label = 'Download';
+                    icon = _loadingDownload
+                        ? const SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                          )
+                        : const Icon(Icons.download_rounded, size: 20);
+                    foregroundColor = Colors.white;
+                    backgroundColor = cs.surfaceContainer;
+                    onPressed = _loadingDownload ? null : _onDownload;
+                  }
+
+                  return ElevatedButton.icon(
+                    onPressed: onPressed,
+                    icon: icon,
+                    label: Text(label, style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w600)),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: backgroundColor,
+                      foregroundColor: foregroundColor,
+                      padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 16),
+                      side: BorderSide(color: foregroundColor.withValues(alpha: 0.4)),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+                    ),
+                  );
+                }),
               ],
               if (widget.details.trailerKey != null)
                 ElevatedButton.icon(
@@ -928,9 +1021,21 @@ class _EpisodesSection extends ConsumerWidget {
                   season: selectedSeason,
                   episode: ep.episodeNumber,
                 );
+                final dl = ref.watch(downloadServiceProvider);
+                final dlTask = dl.allTasks.firstWhereOrNull((t) =>
+                    t.tmdbId == details.id &&
+                    t.season == selectedSeason &&
+                    t.episode == ep.episodeNumber);
+                final downloadStatus = dlTask?.status;
+                final hasLocal = dlTask != null &&
+                    dlTask.status == DownloadStatus.completed &&
+                    dlTask.filePath != null &&
+                    dlTask.filePath!.isNotEmpty;
+
                 return EpisodeTile(
                   episode: ep,
                   watchHistory: history,
+                  downloadStatus: downloadStatus,
                   onTap: () {
                     if (!context.mounted) return;
                     context.push('/native-player', extra: {
@@ -942,6 +1047,10 @@ class _EpisodesSection extends ConsumerWidget {
                       'season': selectedSeason,
                       'episode': ep.episodeNumber,
                       'episodeName': ep.name,
+                      if (hasLocal) ...{
+                        'isLocal': true,
+                        'localPath': dlTask.filePath,
+                      }
                     });
                   },
                   onDownload: () async {
@@ -972,6 +1081,7 @@ class _EpisodesSection extends ConsumerWidget {
                         season: selectedSeason,
                         episode: ep.episodeNumber,
                         preferLang: filters.hasLanguageFilter ? filters.language.token : null,
+                        baseTitle: details.title,
                       ).then((r) => telegram.toQualityOptions(r)),
                     );
 

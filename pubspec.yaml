@@ -38,6 +38,7 @@ dependencies:
   url_launcher: ^6.3.0
   connectivity_plus: ^6.0.3
   package_info_plus: ^8.1.2
+  collection: ^1.18.0
 
 
   # ─── Download Engine ──────────────────────────────────────────────────────

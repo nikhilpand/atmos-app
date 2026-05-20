@@ -293,6 +293,30 @@ class TmdbService {
     );
   }
 
+  Future<List<TmdbMedia>> discoverByGenres(
+    List<int> genreIds, {
+    required MediaType type,
+    int page = 1,
+    String sortBy = 'popularity.desc',
+    double minRating = 0,
+  }) {
+    final idsStr = genreIds.join('|');
+    final cacheKey = 'genres_${idsStr}_${type.name}_$page';
+    final endpoint = type == MediaType.movie ? '/discover/movie' : '/discover/tv';
+    return _getCached(
+      cacheKey,
+      endpoint,
+      queryParams: {
+        'with_genres': idsStr,
+        'page': page,
+        'sort_by': sortBy,
+        if (minRating > 0) 'vote_average.gte': minRating,
+        'vote_count.gte': 50,
+      },
+      defaultType: type,
+    );
+  }
+
   // ── Recommendations & Similar ───────────────────────────────────────────────
 
   Future<List<TmdbMedia>> getRecommendations(int tmdbId, MediaType type) async {

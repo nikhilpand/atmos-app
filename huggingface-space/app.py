@@ -295,7 +295,9 @@ with gr.Blocks(title="Atmos Backend") as demo:
     gr.Markdown("# Atmos Backend — Torrent Cache + AI")
     with gr.Tab("Status"):
         md = gr.Markdown()
-        demo.load(get_status_ui, outputs=[md], every=5)
+        demo.load(get_status_ui, outputs=[md])
+        timer = gr.Timer(5)
+        timer.tick(get_status_ui, outputs=[md])
     with gr.Tab("Manual Cache"):
         inp = gr.Textbox(label="Magnet Link")
         btn = gr.Button("Start")

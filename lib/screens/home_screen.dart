@@ -97,6 +97,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
     final forYou = ref.watch(forYouProvider);
     final continueWatching = ref.watch(continueWatchingProvider);
     final recs = ref.watch(recommendationServiceProvider);
+    final geminiRecs = ref.watch(geminiRecommendationsProvider);
+    final geminiCats = ref.watch(geminiCategoriesProvider);
 
     return Scaffold(
       backgroundColor: cs.surface,
@@ -224,6 +226,66 @@ class _HomeScreenState extends ConsumerState<HomeScreen>
                 ),
               ),
             ),
+
+          // ── Gemini AI Recommendations ─────────────────────────────────────
+          SliverToBoxAdapter(
+            child: geminiRecs.when(
+              data: (items) {
+                if (items.isEmpty) return const SizedBox.shrink();
+                return Padding(
+                  padding: const EdgeInsets.only(top: AppSpacing.lg),
+                  child: MediaRow(
+                    title: '✨ AI Personalized Picks',
+                    items: items,
+                    onTap: _go,
+                  ),
+                );
+              },
+              loading: () => const SizedBox.shrink(),
+              error: (_, __) => const SizedBox.shrink(),
+            ),
+          ),
+
+          // ── Gemini AI Custom Categories ──────────────────────────────────
+          geminiCats.when(
+            data: (categories) {
+              if (categories.isEmpty) return const SliverToBoxAdapter(child: SizedBox.shrink());
+              return SliverList(
+                delegate: SliverChildBuilderDelegate(
+                  (context, index) {
+                    final category = categories[index];
+                    return Consumer(
+                      builder: (context, ref, child) {
+                        final contentVal = ref.watch(geminiCategoryContentProvider((
+                          genreIds: category.tmdbGenreIds,
+                          sortBy: category.sortBy,
+                          type: filter == ContentFilter.tv ? MediaType.tv : MediaType.movie,
+                        )));
+                        return contentVal.when(
+                          data: (items) {
+                            if (items.isEmpty) return const SizedBox.shrink();
+                            return Padding(
+                              padding: const EdgeInsets.only(top: AppSpacing.lg),
+                              child: MediaRow(
+                                title: '🍿 ${category.categoryName}',
+                                items: items,
+                                onTap: _go,
+                              ),
+                            );
+                          },
+                          loading: () => _RowSkeleton(title: '🍿 ${category.categoryName}'),
+                          error: (_, __) => const SizedBox.shrink(),
+                        );
+                      },
+                    );
+                  },
+                  childCount: categories.length,
+                ),
+              );
+            },
+            loading: () => const SliverToBoxAdapter(child: SizedBox.shrink()),
+            error: (_, __) => const SliverToBoxAdapter(child: SizedBox.shrink()),
+          ),
 
           // ── Popular Movies ─────────────────────────────────────────────────
           if (filter != ContentFilter.tv)

@@ -189,12 +189,25 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
     _reconnecting = true;
     _reconnectAttempts = 0;
 
-    while (_reconnectAttempts < _maxReconnectAttempts && !isLoggedIn) {
+    while (_reconnectAttempts < _maxReconnectAttempts) {
+      if (isLoggedIn || (_authState != TelegramAuthState.uninitialized && _authState != TelegramAuthState.error && _reconnectAttempts > 0)) {
+        break;
+      }
       _reconnectAttempts++;
       debugPrint('[Telegram] Reconnect attempt $_reconnectAttempts/$_maxReconnectAttempts...');
       try {
         _isInitialized = false;
+        final oldState = _authState;
         _authState = TelegramAuthState.uninitialized;
+
+        // Release database lock on the old client first
+        if (_clientId != null) {
+          try {
+            _send(const td.Close());
+            await Future.delayed(const Duration(seconds: 1));
+          } catch (_) {}
+        }
+
         // Kill old isolate
         _receiveIsolate?.kill(priority: Isolate.immediate);
         _mainReceivePort?.close();
@@ -203,6 +216,7 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
         _clientId = td.TdPlugin.instance.tdCreateClientId();
         if (_clientId == null) {
           debugPrint('[Telegram] Reconnect: Failed to create client');
+          _authState = oldState;
           continue;
         }
 
@@ -213,10 +227,16 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
         _isInitialized = true;
         debugPrint('[Telegram] Reconnect: TDLib re-initialized');
 
-        // Wait for auth to settle
-        await Future.delayed(const Duration(seconds: 3));
-        if (isLoggedIn) {
-          debugPrint('[Telegram] ✅ Reconnect successful!');
+        // Wait up to 5 seconds for auth to settle to a stable state
+        for (int i = 0; i < 10; i++) {
+          await Future.delayed(const Duration(milliseconds: 500));
+          if (_authState != TelegramAuthState.uninitialized && _authState != TelegramAuthState.error) {
+            break;
+          }
+        }
+
+        if (_authState != TelegramAuthState.uninitialized && _authState != TelegramAuthState.error) {
+          debugPrint('[Telegram] ✅ Reconnect successful! AuthState: $_authState');
           _reconnectAttempts = 0;
           break;
         }
@@ -296,9 +316,11 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
     int? season,
     int? episode,
     String? preferLang,  // ← bound to filter picker
+    String? baseTitle,
   }) async {
     final base = title.trim();
     if (base.isEmpty) return [];
+    final matchTitle = baseTitle ?? base;
 
     // Auto-reconnect if disconnected — non-blocking for catalog path
     if (!isLoggedIn && _isInitialized) {
@@ -319,12 +341,12 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
 
     // ── Stage 2: TDLib direct search (only if logged in) ───────────────────
     final tdlibFuture = isLoggedIn
-        ? _searchViaTdlib(base, year: year, mediaType: mediaType, season: season, episode: episode)
+        ? _searchViaTdlib(base, year: year, mediaType: mediaType, season: season, episode: episode, baseTitle: matchTitle)
         : Future.value(<TelegramSearchResult>[]);
 
     // ── Stage 3: Inline Bots search (only if logged in) ───────────────────
     final inlineBotsFuture = isLoggedIn
-        ? _searchViaInlineBots(base, season: season, episode: episode)
+        ? _searchViaInlineBots(base, season: season, episode: episode, baseTitle: matchTitle)
         : Future.value(<TelegramSearchResult>[]);
 
     // Run all in parallel
@@ -380,8 +402,10 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
     String? mediaType,
     int? season,
     int? episode,
+    String? baseTitle,
   }) async {
-    final titleVariations = await AliasDatabase.getSearchVariations(title);
+    final matchTitle = baseTitle ?? title;
+    final titleVariations = await AliasDatabase.getSearchVariations(matchTitle);
     final queries = <String>{};
 
     for (final variant in titleVariations) {
@@ -398,7 +422,7 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
       }
     }
 
-    debugPrint('[Telegram] TDLib searching ${queries.length} variants for "$title" (Variations: $titleVariations)');
+    debugPrint('[Telegram] TDLib searching ${queries.length} variants for "$matchTitle" (Variations: $titleVariations)');
 
     try {
       final futures = queries.map((q) => _searchOnce(q, season, episode, titleVariations)).toList();
@@ -811,7 +835,7 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
 
   void _handleSearchResults(td.FoundMessages found, {int? extraId}) {
     const minBytes = 50 * 1024 * 1024;                 // 50 MB — skip trailers / fakes
-    const maxBytes = 3 * 1024 * 1024 * 1024;             //  3 GB — explicit int (safe on all platforms)
+    const maxBytes = 15 * 1024 * 1024 * 1024;            // 15 GB
 
     final results = <TelegramSearchResult>[];
     
@@ -868,13 +892,7 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
         }
       }
 
-      final quality = _parseQuality(fileName, caption);
-      final qLower  = quality.toLowerCase();
-      if (qLower.contains('4k') || qLower.contains('2160') ||
-          qLower.contains('uhd') || qLower.contains('dv')) {
-        continue;
-      }
-
+      final quality  = _parseQuality(fileName, caption);
       final codec    = _parseVideoCodec(fileName, caption);
       final audio    = _parseAudio(fileName, caption);
       final partInfo = _detectMultiPart(fileName, caption);
@@ -916,7 +934,7 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
 
     final list = <TelegramSearchResult>[];
     const minBytes = 50 * 1024 * 1024; // 50 MB
-    const maxBytes = 3 * 1024 * 1024 * 1024; // 3 GB
+    const maxBytes = 15 * 1024 * 1024 * 1024; // 15 GB
 
     for (final r in results.results) {
       td.Video? video;
@@ -947,11 +965,6 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
       if (fileSize > maxBytes) continue;
 
       final quality = _parseQuality(fileName, caption);
-      final qLower  = quality.toLowerCase();
-      if (qLower.contains('4k') || qLower.contains('2160') ||
-          qLower.contains('uhd') || qLower.contains('dv')) {
-        continue;
-      }
       final codec = _parseVideoCodec(fileName, caption);
       final audio = _parseAudio(fileName, caption);
       final partInfo = _detectMultiPart(fileName, caption);
@@ -982,6 +995,7 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
     String query, {
     int? season,
     int? episode,
+    String? baseTitle,
   }) async {
     const botUsernames = [
       'SearchMoviesBot',
@@ -1004,7 +1018,8 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
     ];
 
     final results = <TelegramSearchResult>[];
-    final titleVariations = await AliasDatabase.getSearchVariations(query);
+    final matchTitle = baseTitle ?? query;
+    final titleVariations = await AliasDatabase.getSearchVariations(matchTitle);
 
     // Build query variants to maximize find rate:
     // Use at most the top 2 variations of the title to avoid bot rate limits
@@ -1104,8 +1119,8 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
   bool _matchesEpisode(String fileName, String caption, int season, int episode) {
     final text = '$fileName $caption'.toUpperCase();
     
-    // Exact standard matches: S01E01, S01.E01, S01_E01, S01-E01, S01 E01
-    final standardRegex = RegExp('S0*$season[\\s._-]*E0*$episode\\b', caseSensitive: false);
+    // Exact standard matches: S01E01, S01.E01, S01_E01, S01-E01, S01 E01, S01EP01
+    final standardRegex = RegExp('S0*$season[\\s._-]*EP?0*$episode\\b', caseSensitive: false);
     if (standardRegex.hasMatch(text)) return true;
     
     // Also match 1x01, 1x1, 01x01 formats
@@ -1119,6 +1134,12 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
     // Strict exact match fallback
     final genericRegex = RegExp('\\b0*$season[._-]0*$episode\\b', caseSensitive: false);
     if (genericRegex.hasMatch(text)) return true;
+
+    // Season 1 fallback when no season indicator is in the filename (e.g. anime "Show - 01.mkv", "Show [01].mkv")
+    if (season == 1 && !text.contains(RegExp('S\\d|SEASON\\s*\\d', caseSensitive: false))) {
+      final epRegex = RegExp('(\\bEP?|\\s-|\\s\\[|\\s_)\\s*0*$episode\\b', caseSensitive: false);
+      if (epRegex.hasMatch(text)) return true;
+    }
     
     return false;
   }
@@ -1137,8 +1158,9 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
         // Short abbreviations (e.g. bb, got) must be distinct words to prevent false positives
         if (words.contains(cleanVariant)) return true;
       } else {
+        final variantNoSpaces = cleanVariant.replaceAll(' ', '');
         // Substring matches are safe for longer names
-        if (cleanText.contains(cleanVariant) || cleanText.replaceAll(' ', '').contains(cleanVariant)) {
+        if (cleanText.contains(cleanVariant) || cleanText.replaceAll(' ', '').contains(variantNoSpaces)) {
           return true;
         }
       }
