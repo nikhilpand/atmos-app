@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'torrentio_service.dart';
 import 'vegamovies_service.dart';
 import 'stremio_addon_service.dart';
+import 'consumet_service.dart';
 
 /// A single subtitle track from a provider
 class SubtitleInfo {
@@ -70,12 +71,13 @@ class StreamExtractorService {
   static const _ua = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
   /// All available provider keys for server selection UI
-  static const availableProviders = ['VidAPI', 'Videasy', 'VidLink', 'Torrentio', 'VegaMovies', 'Stremio'];
+  static const availableProviders = ['VidAPI', 'Videasy', 'VidLink', 'Consumet', 'Torrentio', 'VegaMovies', 'Stremio'];
 
   // Lazy-initialized external providers
   final _torrentioService = TorrentioService();
   final _vegaMoviesService = VegaMoviesService();
   final _stremioAddonService = StremioAddonService();
+  final _consumetService = ConsumetService();
 
   /// Track last successful provider per content for smarter ordering.
   /// Persisted to SharedPreferences across app restarts.
@@ -274,6 +276,11 @@ class StreamExtractorService {
         return extractVideasyDirect(tmdbId: tmdbId, title: title, type: type, imdbId: imdbId, season: season, episode: episode);
       case 'VidLink':
         return extractVidLinkDirect(tmdbId: tmdbId, type: type, season: season, episode: episode);
+      case 'Consumet':
+        return _consumetService.extractAnimeStream(
+          title: title,
+          episode: episode,
+        );
       case 'Torrentio':
         return _torrentioService.extractStream(
           imdbId: imdbId, type: type, season: season, episode: episode,

@@ -58,3 +58,12 @@ analyzer_output.txt
 chat.md
 implementation_plan.md
 .vscode/
+
+# Agent & local builds
+antigravity-god-mode/
+.venv/
+.antigravitycli/
+.agent/
+memory-bank/
+*.apk
+
