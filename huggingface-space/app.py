@@ -47,7 +47,7 @@ def start_aria2():
             "aria2c", "--enable-rpc=true", "--rpc-listen-all=true",
             "--rpc-allow-origin-all=true", "--rpc-listen-port=6800",
             "--max-connection-per-server=16", "--split=16", "--seed-time=0",
-            f"--max-overall-download-limit={int(MAX_FILE_SIZE_GB)}G",
+            f"--max-overall-download-limit={int(MAX_FILE_SIZE_GB * 1024)}M",
             f"--dir={DOWNLOAD_DIR}", "--quiet=true"
         ])
         logger.info("aria2c started.")

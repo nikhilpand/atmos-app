@@ -448,12 +448,12 @@ void main() {
       ));
     });
 
-    test('availableProviders has exactly 6 distinct entries', () {
+    test('availableProviders has exactly 7 distinct entries', () {
       const providers = StreamExtractorService.availableProviders;
-      expect(providers.length, equals(6));
-      expect(providers.toSet().length, equals(6));
+      expect(providers.length, equals(7));
+      expect(providers.toSet().length, equals(7));
       _record(_Result(
-        title: 'provider count = 6', component: 'Extractor.providers',
+        title: 'provider count = 7', component: 'Extractor.providers',
         status: _TestStatus.pass,
         detail: providers.join(', '),
         elapsed: Duration.zero,

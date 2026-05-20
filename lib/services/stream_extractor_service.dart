@@ -41,6 +41,7 @@ class ExtractedStream {
   final String providerName;
   final List<SubtitleInfo> subtitles;
   final List<QualityOption> qualities;
+  final String? magnetUrl;
 
   const ExtractedStream({
     required this.url,
@@ -48,6 +49,7 @@ class ExtractedStream {
     required this.providerName,
     this.subtitles = const [],
     this.qualities = const [],
+    this.magnetUrl,
   });
 
   bool get isHls => url.contains('.m3u8') || url.contains('mpegurl');

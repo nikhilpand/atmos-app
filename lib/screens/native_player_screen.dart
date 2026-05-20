@@ -41,6 +41,7 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
   Timer? _controlsTimer;
   bool _hasAdvanced = false;
   bool _isBuffering = false;
+  bool _skipCaching = false;
 
   // Provider status tracking for UI pills
   final Map<String, ProviderStatus> _providerStatuses = {};
@@ -656,7 +657,92 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
     _positionSub = _player.stream.position.listen(_onPositionChanged);
   }
 
+  void _onSkipCaching() {
+    setState(() {
+      _skipCaching = true;
+      _statusMsg = 'Skipping cloud cache, opening direct stream...';
+    });
+  }
+
   void _playStream(ExtractedStream stream, {Duration? resumeFrom}) async {
+    _skipCaching = false;
+
+    if (stream.magnetUrl != null) {
+      final cacheService = ref.read(torrentCacheServiceProvider);
+      setState(() {
+        _state = _ExState.extracting;
+        _statusMsg = 'Checking cloud cache server...';
+        _providerBadge = stream.providerName;
+        _currentStream = stream;
+        _activeQuality = stream.hasQualities ? stream.qualities.first.quality : '';
+      });
+
+      try {
+        final health = await cacheService.healthCheck();
+        if (health.isOnline && health.gdriveConfigured && !_skipCaching) {
+          setState(() {
+            _statusMsg = 'Initiating cloud cache on Google Drive...';
+          });
+
+          final taskId = await cacheService.submitMagnet(stream.magnetUrl!);
+          if (taskId != null && !_skipCaching) {
+            // Poll for 10 minutes max
+            final deadline = DateTime.now().add(const Duration(minutes: 10));
+            bool cachingDone = false;
+
+            while (DateTime.now().isBefore(deadline) && !_skipCaching && mounted) {
+              final status = await cacheService.pollStatus(taskId);
+              
+              if (status.status == 'completed' && status.fileId != null) {
+                final gdriveUrl = cacheService.getStreamUrl(status.fileId!);
+                debugPrint('[TorrentCache] ✅ Caching completed. Stream URL: $gdriveUrl');
+
+                final cachedStream = ExtractedStream(
+                  url: gdriveUrl,
+                  headers: stream.headers,
+                  providerName: '${stream.providerName} (GDrive Cloud ⚡)',
+                  subtitles: stream.subtitles,
+                  qualities: [
+                    QualityOption(quality: 'GDrive Cache', url: gdriveUrl),
+                    ...stream.qualities,
+                  ],
+                  magnetUrl: stream.magnetUrl,
+                );
+
+                cachingDone = true;
+                _playDirectly(cachedStream, resumeFrom: resumeFrom);
+                break;
+              }
+
+              if (status.status == 'failed' || status.status == 'error') {
+                debugPrint('[TorrentCache] ❌ Caching failed on server: ${status.error}');
+                break;
+              }
+
+              setState(() {
+                _statusMsg = 'Cloud Caching to GDrive: ${status.status} (${status.progress}%)';
+              });
+
+              await Future.delayed(const Duration(seconds: 4));
+            }
+
+            if (!cachingDone && !_skipCaching && mounted) {
+              debugPrint('[TorrentCache] Caching not completed, falling back to direct Webtor');
+              _playDirectly(stream, resumeFrom: resumeFrom);
+            }
+            return;
+          }
+        }
+      } catch (e) {
+        debugPrint('[TorrentCache] Caching flow error: $e');
+      }
+    }
+
+    _playDirectly(stream, resumeFrom: resumeFrom);
+  }
+
+  void _playDirectly(ExtractedStream stream, {Duration? resumeFrom}) async {
+    if (!mounted) return;
     setState(() {
       _state = _ExState.playing;
       _statusMsg = 'Playing via ${stream.providerName}';
@@ -1370,7 +1456,8 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
                       state: _state,
                       message: _state == _ExState.failed ? (_failedMsg ?? 'Unknown error') : _statusMsg,
                       onRetry: _state == _ExState.failed ? () => _startExtraction(forceRetry: true) : null,
-                       onSwitchSource: _state == _ExState.failed ? _tryAnotherSource : null,
+                      onSwitchSource: _state == _ExState.failed ? _tryAnotherSource : null,
+                      onSkip: _statusMsg.contains('Caching') ? _onSkipCaching : null,
                       providerStatuses: _providerStatuses,
                     ),
                   ),
@@ -1476,6 +1563,7 @@ class _StatusOverlay extends StatelessWidget {
   final String message;
   final VoidCallback? onRetry;
   final VoidCallback? onSwitchSource;
+  final VoidCallback? onSkip;
   final Map<String, ProviderStatus> providerStatuses;
 
   const _StatusOverlay({
@@ -1483,6 +1571,7 @@ class _StatusOverlay extends StatelessWidget {
     required this.message,
     this.onRetry,
     this.onSwitchSource,
+    this.onSkip,
     this.providerStatuses = const {},
   });
 
@@ -1521,6 +1610,19 @@ class _StatusOverlay extends StatelessWidget {
                   'This may take a few seconds',
                   style: TextStyle(color: Colors.white.withValues(alpha: 0.3), fontSize: 12),
                 ),
+                if (onSkip != null) ...[
+                  const SizedBox(height: 20),
+                  OutlinedButton.icon(
+                    onPressed: onSkip,
+                    icon: const Icon(Icons.skip_next_rounded, size: 16),
+                    label: const Text('Skip Caching (Play direct Webtor)'),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.white70,
+                      side: const BorderSide(color: Colors.white24),
+                      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                    ),
+                  ),
+                ],
               ] else ...[
                 const Icon(Icons.error_outline, color: Colors.redAccent, size: 56),
                 const SizedBox(height: 16),

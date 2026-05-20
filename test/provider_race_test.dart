@@ -144,8 +144,8 @@ void main() {
   });
 
   group('StreamExtractorService — provider list evolution', () {
-    test('all 6 providers are in the available list (dead providers removed)', () {
-      const expected = {'VidAPI', 'Videasy', 'VidLink', 'Torrentio', 'VegaMovies', 'Stremio'};
+    test('all 7 providers are in the available list (dead providers removed)', () {
+      const expected = {'VidAPI', 'Videasy', 'VidLink', 'Consumet', 'Torrentio', 'VegaMovies', 'Stremio'};
       final actual = StreamExtractorService.availableProviders.toSet();
       expect(actual, equals(expected));
     });
@@ -169,7 +169,7 @@ void main() {
         },
       );
 
-      // All 6 providers should have been tried
+      // All 7 providers should have been tried
       expect(statuses.keys.length, equals(StreamExtractorService.availableProviders.length));
     });
 

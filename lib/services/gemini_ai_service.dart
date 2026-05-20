@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class GeminiCategory {
   final String categoryName;
@@ -68,8 +69,28 @@ class GeminiAiService {
     return 'https://nikhil1776-torrentindex.hf.space';
   }
 
+  Future<String?> _getApiKey() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      String? key = prefs.getString('custom_gemini_api_key');
+      if (key == null || key.isEmpty) {
+        key = dotenv.env['GEMINI_API_KEY'];
+      }
+      if (key == 'AIzaSyCbfVje1oHISOW-VXZA_JjPofIthycdnmg') {
+        return null;
+      }
+      return key;
+    } catch (_) {
+      return null;
+    }
+  }
+
   /// Check if the Gemini service is online and active.
   Future<bool> isGeminiConfigured() async {
+    final key = await _getApiKey();
+    if (key != null && key.isNotEmpty) {
+      return true;
+    }
     try {
       final resp = await http.get(
         Uri.parse('$_baseUrl/api/health'),
@@ -93,6 +114,53 @@ class GeminiAiService {
     required List<String> preferredGenres,
     String preferredLang = 'English',
   }) async {
+    final key = await _getApiKey();
+    if (key != null && key.isNotEmpty) {
+      final prompt = """You are a movie/TV show recommendation engine.
+Based on the user's viewing history and preferences, suggest 20 personalized recommendations.
+
+Watch History (most recent first): ${jsonEncode(watchHistory.take(20).toList())}
+Recent Searches: ${jsonEncode(searchHistory.take(10).toList())}
+Preferred Genres: ${jsonEncode(preferredGenres)}
+Preferred Language: $preferredLang
+
+Return a JSON array of objects with:
+- "title": exact movie/show title
+- "tmdb_id": TMDB ID if known, else 0
+- "type": "movie" or "tv"
+- "reason": 1-line explanation
+- "category": one of "Because You Watched", "Trending in Your Taste", "Hidden Gems", "New Releases", "Genre Deep Dive"
+- "confidence": 0.0-1.0
+
+Prioritize quality hidden gems over obvious mainstream picks.
+Return ONLY valid JSON array.""";
+
+      try {
+        final resp = await http.post(
+          Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$key'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'contents': [{'parts': [{'text': prompt}]}],
+            'generationConfig': {
+              'responseMimeType': 'application/json',
+            }
+          }),
+        ).timeout(_timeout);
+
+        if (resp.statusCode == 200) {
+          final data = jsonDecode(resp.body);
+          final text = data['candidates']?[0]?['content']?['parts']?[0]?['text'] ?? '';
+          final parsed = jsonDecode(text.trim()) as List? ?? [];
+          return parsed.map((item) => GeminiRecommendation.fromJson(item as Map<String, dynamic>)).toList();
+        } else {
+          debugPrint('[GeminiAI] Direct Recommendations HTTP ${resp.statusCode}: ${resp.body}');
+        }
+      } catch (e) {
+        debugPrint('[GeminiAI] Direct Recommendations error: $e');
+      }
+      return [];
+    }
+
     try {
       final payload = {
         'watch_history': watchHistory,
@@ -128,6 +196,47 @@ class GeminiAiService {
     required List<Map<String, dynamic>> watchHistory,
     required List<String> preferredGenres,
   }) async {
+    final key = await _getApiKey();
+    if (key != null && key.isNotEmpty) {
+      final prompt = """Create 8 personalized content category names for a streaming app home screen.
+User watches: ${jsonEncode(watchHistory.take(15).toList())}
+Preferred genres: ${jsonEncode(preferredGenres)}
+
+Return JSON array with:
+- "category_name": creative Netflix-style name
+- "description": what belongs here
+- "tmdb_genre_ids": array of TMDB genre IDs
+- "sort_by": "popularity.desc" or "vote_average.desc" or "release_date.desc"
+
+Good examples: "Mind-Bending Thrillers", "Anime After Dark", "Feel-Good Weekend Picks"
+Return ONLY valid JSON.""";
+
+      try {
+        final resp = await http.post(
+          Uri.parse('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$key'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({
+            'contents': [{'parts': [{'text': prompt}]}],
+            'generationConfig': {
+              'responseMimeType': 'application/json',
+            }
+          }),
+        ).timeout(_timeout);
+
+        if (resp.statusCode == 200) {
+          final data = jsonDecode(resp.body);
+          final text = data['candidates']?[0]?['content']?['parts']?[0]?['text'] ?? '';
+          final parsed = jsonDecode(text.trim()) as List? ?? [];
+          return parsed.map((item) => GeminiCategory.fromJson(item as Map<String, dynamic>)).toList();
+        } else {
+          debugPrint('[GeminiAI] Direct Categories HTTP ${resp.statusCode}: ${resp.body}');
+        }
+      } catch (e) {
+        debugPrint('[GeminiAI] Direct Categories error: $e');
+      }
+      return [];
+    }
+
     try {
       final payload = {
         'watch_history': watchHistory,

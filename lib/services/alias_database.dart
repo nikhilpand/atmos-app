@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:hive/hive.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter_dotenv/flutter_dotenv.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 class AliasDatabase {
   static Box? _box;
@@ -150,8 +151,19 @@ class AliasDatabase {
 
   /// Gemini API query
   static Future<List<String>> _fetchFromGemini(String title) async {
-    final apiKey = dotenv.env['GEMINI_API_KEY'];
-    if (apiKey == null || apiKey.isEmpty) return [];
+    String? apiKey;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      apiKey = prefs.getString('custom_gemini_api_key');
+    } catch (_) {}
+
+    if (apiKey == null || apiKey.isEmpty) {
+      apiKey = dotenv.env['GEMINI_API_KEY'];
+    }
+
+    if (apiKey == 'AIzaSyCbfVje1oHISOW-VXZA_JjPofIthycdnmg' || apiKey == null || apiKey.isEmpty) {
+      return [];
+    }
 
     final url = Uri.parse(
         'https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=$apiKey');

@@ -32,6 +32,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
   bool _skipIntro = false;
   bool _saveHistory = true;
   String _version = '';
+  String _geminiApiKey = '';
 
   @override
   void initState() {
@@ -60,6 +61,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       _saveHistory       = prefs.getBool('app_save_history') ?? true;
       _downloadSource    = DownloadSourceLabel.fromString(prefs.getString('dl_source'));
       _version           = version;
+      _geminiApiKey      = prefs.getString('custom_gemini_api_key') ?? '';
     });
   }
 
@@ -200,6 +202,24 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               ),
           ]),
 
+          // ── Gemini AI ──────────────────────────────────────────────
+          _SettingsCard(header: 'Gemini AI', children: [
+            _SettingTile(
+              icon: Icons.auto_awesome_rounded,
+              title: 'API Configuration',
+              subtitle: _geminiApiKey.isNotEmpty
+                  ? 'Custom key configured (${_geminiApiKey.length > 10 ? '${_geminiApiKey.substring(0, 10)}...' : _geminiApiKey})'
+                  : 'Not configured (using backend fallback)',
+              onTap: _showGeminiKeyDialog,
+              trailing: Icon(Icons.edit_rounded, color: cs.primary),
+            ),
+            const _SettingTile(
+              icon: Icons.info_outline_rounded,
+              title: 'About Gemini Integration',
+              subtitle: 'Powers personalized movie recommendations, smart home screen categories, and search alias expansion.',
+            ),
+          ]),
+
           // ── Player ────────────────────────────────────────────────
           _SettingsCard(header: 'Player', children: [
             _SettingTile(
@@ -298,6 +318,65 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       context: context,
       isScrollControlled: true,
       builder: (ctx) => _TelegramLoginSheet(telegram: telegram),
+    );
+  }
+
+  void _showGeminiKeyDialog() {
+    final controller = TextEditingController(text: _geminiApiKey);
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text('Gemini API Key'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text(
+                'Enter a valid Gemini API key to enable direct, high-performance personalized recommendations and search alias expansion.',
+                style: TextStyle(fontSize: 12),
+              ),
+              const SizedBox(height: 16),
+              TextField(
+                controller: controller,
+                autofocus: true,
+                decoration: const InputDecoration(
+                  labelText: 'API Key',
+                  hintText: 'AIzaSy...',
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                final key = controller.text.trim();
+                final navigator = Navigator.of(context);
+                final messenger = ScaffoldMessenger.of(context);
+                final prefs = await SharedPreferences.getInstance();
+                if (key.isEmpty) {
+                  await prefs.remove('custom_gemini_api_key');
+                } else {
+                  await prefs.setString('custom_gemini_api_key', key);
+                }
+                setState(() {
+                  _geminiApiKey = key;
+                });
+                navigator.pop();
+                messenger.showSnackBar(
+                  const SnackBar(content: Text('✅ Gemini API key updated!')),
+                );
+              },
+              child: const Text('Save'),
+            ),
+          ],
+        );
+      },
     );
   }
 
@@ -437,6 +516,7 @@ class _TelegramLoginSheetState extends State<_TelegramLoginSheet> {
   final _otpController      = TextEditingController();
   final _passwordController = TextEditingController();
   bool _loading = false;
+  bool _forceShowPhone = false;
   String? _error;
 
   @override
@@ -470,6 +550,11 @@ class _TelegramLoginSheetState extends State<_TelegramLoginSheet> {
     final state     = widget.telegram.authState;
     final cs        = Theme.of(context).colorScheme;
     final bottomPad = MediaQuery.of(context).viewInsets.bottom;
+
+    final showPhoneInput = state == TelegramAuthState.waitingForPhone ||
+        state == TelegramAuthState.uninitialized ||
+        state == TelegramAuthState.error ||
+        _forceShowPhone;
 
     return Padding(
       padding: EdgeInsets.fromLTRB(
@@ -519,9 +604,7 @@ class _TelegramLoginSheetState extends State<_TelegramLoginSheet> {
           ],
 
           // Step 1: Phone
-          if (state == TelegramAuthState.waitingForPhone ||
-              state == TelegramAuthState.uninitialized ||
-              state == TelegramAuthState.error) ...[
+          if (showPhoneInput) ...[
             Text('Phone Number', style: Theme.of(context).textTheme.labelLarge),
             const SizedBox(height: AppSpacing.sm),
             TextField(
@@ -544,7 +627,7 @@ class _TelegramLoginSheetState extends State<_TelegramLoginSheet> {
           ],
 
           // Step 2: OTP
-          if (state == TelegramAuthState.waitingForOtp) ...[
+          if (!showPhoneInput && state == TelegramAuthState.waitingForOtp) ...[
             Text('Enter OTP Code', style: Theme.of(context).textTheme.labelLarge),
             const SizedBox(height: AppSpacing.xs),
             Text('Sent to ${widget.telegram.phone ?? _phoneController.text}',
@@ -573,10 +656,22 @@ class _TelegramLoginSheetState extends State<_TelegramLoginSheet> {
                     : const Text('Verify'),
               ),
             ),
+            const SizedBox(height: AppSpacing.sm),
+            Center(
+              child: TextButton(
+                onPressed: _loading ? null : () {
+                  setState(() {
+                    _forceShowPhone = true;
+                    _error = null;
+                  });
+                },
+                child: const Text('Change phone number'),
+              ),
+            ),
           ],
 
           // Step 3: 2FA
-          if (state == TelegramAuthState.waitingFor2fa) ...[
+          if (!showPhoneInput && state == TelegramAuthState.waitingFor2fa) ...[
             Text('Two-Factor Password', style: Theme.of(context).textTheme.labelLarge),
             const SizedBox(height: AppSpacing.sm),
             TextField(
@@ -590,7 +685,22 @@ class _TelegramLoginSheetState extends State<_TelegramLoginSheet> {
               width: double.infinity,
               child: FilledButton(
                 onPressed: _loading ? null : _submit2fa,
-                child: const Text('Submit'),
+                child: _loading
+                    ? const SizedBox(width: 20, height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2))
+                    : const Text('Submit'),
+              ),
+            ),
+            const SizedBox(height: AppSpacing.sm),
+            Center(
+              child: TextButton(
+                onPressed: _loading ? null : () {
+                  setState(() {
+                    _forceShowPhone = true;
+                    _error = null;
+                  });
+                },
+                child: const Text('Change phone number'),
               ),
             ),
           ],
@@ -610,8 +720,9 @@ class _TelegramLoginSheetState extends State<_TelegramLoginSheet> {
     setState(() { _loading = true; _error = null; });
     try {
       await widget.telegram.sendPhoneNumber(phone);
+      setState(() => _forceShowPhone = false);
     } catch (e) {
-      setState(() => _error = e.toString());
+      setState(() => _error = e.toString().replaceAll('Exception: ', ''));
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -627,7 +738,7 @@ class _TelegramLoginSheetState extends State<_TelegramLoginSheet> {
     try {
       await widget.telegram.verifyOtp(code);
     } catch (e) {
-      setState(() => _error = e.toString());
+      setState(() => _error = e.toString().replaceAll('Exception: ', ''));
     } finally {
       if (mounted) setState(() => _loading = false);
     }
@@ -643,7 +754,7 @@ class _TelegramLoginSheetState extends State<_TelegramLoginSheet> {
     try {
       await widget.telegram.verify2fa(pwd);
     } catch (e) {
-      setState(() => _error = e.toString());
+      setState(() => _error = e.toString().replaceAll('Exception: ', ''));
     } finally {
       if (mounted) setState(() => _loading = false);
     }

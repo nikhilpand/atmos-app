@@ -93,6 +93,16 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
   final _pendingInlineQueries = <int, Completer<List<TelegramSearchResult>>>{};
   static final _botIdCache = <String, int>{};
 
+  // Generic request tracking
+  final _pendingGenericRequests = <int, Completer<dynamic>>{};
+
+  void _clearPendingRequests(String reason) {
+    for (final c in _pendingGenericRequests.values) {
+      if (!c.isCompleted) c.completeError(Exception(reason));
+    }
+    _pendingGenericRequests.clear();
+  }
+
   // Wait for initial auth state resolution
   final Completer<void> _readyCompleter = Completer<void>();
   Future<void> get whenReady => _readyCompleter.future;
@@ -154,6 +164,7 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
 
   @override
   void dispose() {
+    _clearPendingRequests('Service disposed');
     WidgetsBinding.instance.removeObserver(this);
     if (_clientId != null) {
       _send(const td.Close());
@@ -188,6 +199,7 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
     if (_reconnecting) return;
     _reconnecting = true;
     _reconnectAttempts = 0;
+    _clearPendingRequests('Reconnecting client');
 
     while (_reconnectAttempts < _maxReconnectAttempts) {
       if (isLoggedIn || (_authState != TelegramAuthState.uninitialized && _authState != TelegramAuthState.error && _reconnectAttempts > 0)) {
@@ -270,10 +282,22 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
 
   // ── Authentication ────────────────────────────────────────────────────────
 
+  Future<dynamic> _sendRequest(td.TdFunction fn) {
+    final completer = Completer<dynamic>();
+    final id = _nextExtra();
+    _pendingGenericRequests[id] = completer;
+    _send(fn, extra: id);
+    return completer.future.timeout(const Duration(seconds: 15), onTimeout: () {
+      _pendingGenericRequests.remove(id);
+      throw TimeoutException('Telegram request timed out. Please try again.');
+    });
+  }
+
   /// Step 1: Send phone number.
   Future<void> sendPhoneNumber(String phone) async {
     _phone = phone;
-    _send(td.SetAuthenticationPhoneNumber(
+    _errorMessage = null;
+    await _sendRequest(td.SetAuthenticationPhoneNumber(
       phoneNumber: phone,
       settings: const td.PhoneNumberAuthenticationSettings(
         allowFlashCall: false,
@@ -289,19 +313,25 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
 
   /// Step 2: Verify OTP code.
   Future<void> verifyOtp(String code) async {
-    _send(td.CheckAuthenticationCode(code: code));
+    _errorMessage = null;
+    await _sendRequest(td.CheckAuthenticationCode(code: code));
   }
 
   /// Step 3 (if needed): Enter 2FA password.
   Future<void> verify2fa(String password) async {
-    _send(td.CheckAuthenticationPassword(password: password));
+    _errorMessage = null;
+    await _sendRequest(td.CheckAuthenticationPassword(password: password));
   }
 
   /// Logout.
   Future<void> logout() async {
     _authState = TelegramAuthState.loggingOut;
     notifyListeners();
-    _send(const td.LogOut());
+    try {
+      await _sendRequest(const td.LogOut());
+    } catch (e) {
+      debugPrint('[Telegram] Logout request failed: $e');
+    }
   }
 
   // ── Global Search (Hybrid: AtmosIndex catalog + TDLib) ────────────────────
@@ -656,26 +686,19 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
   void _handleTdUpdate(dynamic obj, {int? extra}) {
     if (obj == null) return;
 
+    // Route generic request responses first
+    if (extra != null && _pendingGenericRequests.containsKey(extra)) {
+      final completer = _pendingGenericRequests.remove(extra);
+      if (obj is td.TdError) {
+        completer?.completeError(Exception(obj.message));
+      } else {
+        completer?.complete(obj);
+      }
+      return;
+    }
+
     // ── Errors with pending search/resolution cleanup ──────────────────
     if (obj is td.TdError) {
-      const ignorableCodes = {401, 404, 406, 420};
-      if (ignorableCodes.contains(obj.code)) {
-        debugPrint('[Telegram] Non-fatal error ${obj.code}: ${obj.message}');
-        if (extra != null) {
-          final p = _pendingSearches.remove(extra);
-          if (p != null && !p.completer.isCompleted) p.completer.complete([]);
-
-          final c = _pendingChatResolves.remove(extra);
-          if (c != null && !c.isCompleted) c.complete(null);
-
-          final r = _pendingResolves.remove(extra);
-          if (r != null && !r.isCompleted) r.complete(null);
-
-          final i = _pendingInlineQueries.remove(extra);
-          if (i != null && !i.isCompleted) i.complete([]);
-        }
-        return;
-      }
       debugPrint('[Telegram] Error ${obj.code}: ${obj.message}');
       if (extra != null) {
         final p = _pendingSearches.remove(extra);
@@ -690,9 +713,6 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
         final i = _pendingInlineQueries.remove(extra);
         if (i != null && !i.isCompleted) i.complete([]);
       }
-      _errorMessage = obj.message;
-      _authState = TelegramAuthState.error;
-      notifyListeners();
       return;
     }
 

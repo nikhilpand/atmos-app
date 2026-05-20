@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'stream_extractor_service.dart';
+import 'torrentio_service.dart';
 
 // ─── Generic Stremio Addon Client ────────────────────────────────────────────
 //
@@ -49,6 +50,16 @@ class StremioStream {
 
   /// Whether this is a torrent source (needs proxy to stream)
   bool get isTorrent => infoHash != null && infoHash!.isNotEmpty;
+
+  /// Construct the standard magnet URL for this torrent stream
+  String? get magnetUrl {
+    if (infoHash == null || infoHash!.isEmpty) return null;
+    const trackers =
+        '&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce'
+        '&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce'
+        '&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce';
+    return 'magnet:?xt=urn:btih:$infoHash$trackers';
+  }
 
   /// Parse quality from title string
   String get quality {
@@ -195,7 +206,7 @@ class StremioAddonService {
       episode: episode,
     );
 
-    // Prefer direct HTTP streams
+    // 1. Prefer direct HTTP streams
     for (final stream in streams) {
       if (stream.isDirectStream && stream.url != null) {
         return ExtractedStream(
@@ -206,6 +217,27 @@ class StremioAddonService {
           qualities: [
             QualityOption(quality: stream.quality, url: stream.url!),
           ],
+        );
+      }
+    }
+
+    // 2. Fallback to torrent streams (using Webtor/Google Drive caching)
+    for (final stream in streams.where((s) => s.isTorrent)) {
+      final torrentioService = TorrentioService();
+      final resolvedUrl = await torrentioService.resolveStreamUrl(
+        stream.infoHash!,
+        fileIdx: stream.fileIdx ?? 0,
+      );
+      if (resolvedUrl != null && resolvedUrl.isNotEmpty) {
+        return ExtractedStream(
+          url: resolvedUrl,
+          headers: const {'User-Agent': _ua},
+          providerName: 'Stremio Torrent (${stream.name})',
+          subtitles: const [],
+          qualities: [
+            QualityOption(quality: stream.quality, url: resolvedUrl),
+          ],
+          magnetUrl: stream.magnetUrl,
         );
       }
     }

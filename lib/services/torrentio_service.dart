@@ -357,6 +357,13 @@ class TorrentioService {
 
       if (streamUrl != null && streamUrl.isNotEmpty) {
         debugPrint('[Torrentio] ✅ Resolved: ${source.quality} ${source.codec} ${source.sizeGB.toStringAsFixed(1)}GB → $streamUrl');
+        
+        const trackers =
+            '&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce'
+            '&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce'
+            '&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce';
+        final magnet = 'magnet:?xt=urn:btih:${source.infoHash}$trackers';
+
         return ExtractedStream(
           url: streamUrl,
           headers: {'User-Agent': _ua},
@@ -365,6 +372,7 @@ class TorrentioService {
           qualities: [
             QualityOption(quality: '${source.quality} ${source.sizeLabel}', url: streamUrl),
           ],
+          magnetUrl: magnet,
         );
       }
     }

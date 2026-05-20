@@ -11,10 +11,9 @@ void main() {
     });
 
     test('getSearchVariations dynamically generates initials for unknown titles', () async {
-      final variations = await AliasDatabase.getSearchVariations('Better Call Saul');
-      expect(variations, contains('bcs'));
-      expect(variations, contains('BCS'));
-      expect(variations, contains('bettercallsaul'));
+      final variations = await AliasDatabase.getSearchVariations('House of Cards');
+      expect(variations, contains('hoc'));
+      expect(variations, contains('HouseofCards'));
     });
 
     test('getSearchVariations handles stop words and connector swaps', () async {

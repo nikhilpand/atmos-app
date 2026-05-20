@@ -81,11 +81,12 @@ void main() {
       service = StreamExtractorService();
     });
 
-    test('availableProviders has 6 providers (dead providers removed, VidLink added)', () {
-      expect(StreamExtractorService.availableProviders.length, equals(6));
+    test('availableProviders has 7 providers (dead providers removed, VidLink & Consumet added)', () {
+      expect(StreamExtractorService.availableProviders.length, equals(7));
       expect(StreamExtractorService.availableProviders, contains('VidAPI'));
       expect(StreamExtractorService.availableProviders, contains('Videasy'));
       expect(StreamExtractorService.availableProviders, contains('VidLink'));
+      expect(StreamExtractorService.availableProviders, contains('Consumet'));
       expect(StreamExtractorService.availableProviders, contains('Torrentio'));
       expect(StreamExtractorService.availableProviders, contains('VegaMovies'));
       expect(StreamExtractorService.availableProviders, contains('Stremio'));
@@ -128,7 +129,7 @@ void main() {
         },
       );
 
-      // All providers should have been attempted (now 6: VidAPI, Videasy, VidLink, Torrentio, VegaMovies, Stremio)
+      // All providers should have been attempted (now 7: VidAPI, Videasy, VidLink, Consumet, Torrentio, VegaMovies, Stremio)
       expect(statuses.length, equals(StreamExtractorService.availableProviders.length));
 
       for (final entry in statuses.entries) {
