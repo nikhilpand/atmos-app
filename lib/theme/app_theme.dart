@@ -265,7 +265,6 @@ class AtmosTheme {
       pageTransitionsTheme: const PageTransitionsTheme(
         builders: {
           TargetPlatform.android: PredictiveBackPageTransitionsBuilder(),
-          TargetPlatform.iOS:     CupertinoPageTransitionsBuilder(),
           TargetPlatform.linux:   ZoomPageTransitionsBuilder(
             allowEnterRouteSnapshotting: false,
           ),
