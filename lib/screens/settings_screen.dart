@@ -364,6 +364,8 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                 } else {
                   await prefs.setString('custom_gemini_api_key', key);
                 }
+                ref.invalidate(geminiRecommendationsProvider);
+                ref.invalidate(geminiCategoriesProvider);
                 setState(() {
                   _geminiApiKey = key;
                 });
@@ -556,6 +558,79 @@ class _TelegramLoginSheetState extends State<_TelegramLoginSheet> {
         state == TelegramAuthState.error ||
         _forceShowPhone;
 
+    int activeStep = 0;
+    if (state == TelegramAuthState.waitingForPhone || showPhoneInput) {
+      activeStep = 0;
+    } else if (state == TelegramAuthState.waitingForOtp) {
+      activeStep = 1;
+    } else if (state == TelegramAuthState.waitingFor2fa) {
+      activeStep = 2;
+    }
+
+    Widget buildStepIndicator(int index, String label) {
+      final isActive = activeStep == index;
+      final isCompleted = activeStep > index;
+      final color = isActive
+          ? cs.primary
+          : (isCompleted ? cs.primary.withOpacity(0.7) : cs.onSurfaceVariant.withOpacity(0.3));
+
+      return Expanded(
+        child: Column(
+          children: [
+            Row(
+              children: [
+                Expanded(
+                  child: Divider(
+                    color: index == 0 ? Colors.transparent : color,
+                    thickness: 2,
+                  ),
+                ),
+                Container(
+                  width: 24,
+                  height: 24,
+                  decoration: BoxDecoration(
+                    color: isActive ? cs.primaryContainer : (isCompleted ? cs.primary : Colors.transparent),
+                    border: Border.all(
+                      color: isActive ? cs.primary : cs.onSurfaceVariant.withOpacity(0.3),
+                      width: 2,
+                    ),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Center(
+                    child: isCompleted
+                        ? Icon(Icons.check, size: 14, color: cs.onPrimary)
+                        : Text(
+                            '${index + 1}',
+                            style: TextStyle(
+                              fontSize: 12,
+                              fontWeight: FontWeight.bold,
+                              color: isActive ? cs.onPrimaryContainer : cs.onSurfaceVariant.withOpacity(0.5),
+                            ),
+                          ),
+                  ),
+                ),
+                Expanded(
+                  child: Divider(
+                    color: index == 2 ? Colors.transparent : color,
+                    thickness: 2,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 10,
+                fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
+                color: isActive ? cs.primary : cs.onSurfaceVariant.withOpacity(0.6),
+              ),
+            ),
+          ],
+        ),
+      );
+    }
+
     return Padding(
       padding: EdgeInsets.fromLTRB(
         AppSpacing.lg, AppSpacing.lg, AppSpacing.lg, AppSpacing.lg + bottomPad),
@@ -577,133 +652,223 @@ class _TelegramLoginSheetState extends State<_TelegramLoginSheet> {
             ),
             const SizedBox(width: AppSpacing.md),
             Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text('Connect Telegram', style: Theme.of(context).textTheme.titleLarge),
+              Text('Connect Telegram', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
               Text('For lightning-fast CDN downloads',
-                  style: Theme.of(context).textTheme.bodySmall),
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant.withOpacity(0.7))),
             ])),
           ]),
           const SizedBox(height: AppSpacing.lg),
 
+          // Horizontal Progress Tracker / Stepper
+          Row(
+            children: [
+              buildStepIndicator(0, 'Phone'),
+              buildStepIndicator(1, 'OTP Code'),
+              buildStepIndicator(2, '2FA Password'),
+            ],
+          ),
+          const SizedBox(height: AppSpacing.lg + AppSpacing.xs),
+
           // Error banner
           if (_error != null || widget.telegram.errorMessage != null) ...[
-            Card(
-              color: cs.errorContainer,
-              child: Padding(
-                padding: const EdgeInsets.all(AppSpacing.sm),
-                child: Row(children: [
-                  Icon(Icons.error_outline, color: cs.onErrorContainer, size: 18),
-                  const SizedBox(width: AppSpacing.sm),
-                  Expanded(child: Text(
-                    _error ?? widget.telegram.errorMessage!,
-                    style: TextStyle(color: cs.onErrorContainer, fontSize: 12),
-                  )),
-                ]),
+            Container(
+              decoration: BoxDecoration(
+                color: cs.errorContainer.withOpacity(0.7),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: cs.error.withOpacity(0.3)),
               ),
-            ),
+              padding: const EdgeInsets.all(AppSpacing.md),
+              child: Row(children: [
+                Icon(Icons.error_outline, color: cs.onErrorContainer, size: 20),
+                const SizedBox(width: AppSpacing.md),
+                Expanded(child: Text(
+                  _error ?? widget.telegram.errorMessage!,
+                  style: TextStyle(color: cs.onErrorContainer, fontSize: 13, fontWeight: FontWeight.w500),
+                )),
+              ]),
+            ).animate().fadeIn(duration: 200.ms).slideY(begin: 0.1, end: 0),
             const SizedBox(height: AppSpacing.md),
           ],
 
-          // Step 1: Phone
-          if (showPhoneInput) ...[
-            Text('Phone Number', style: Theme.of(context).textTheme.labelLarge),
-            const SizedBox(height: AppSpacing.sm),
-            TextField(
-              controller: _phoneController,
-              keyboardType: TextInputType.phone,
-              inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[\d+ ]'))],
-              decoration: const InputDecoration(hintText: '+1 202 555 0100'),
-            ),
-            const SizedBox(height: AppSpacing.md),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton(
-                onPressed: _loading ? null : _submitPhone,
-                child: _loading
-                    ? const SizedBox(width: 20, height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Text('Send OTP'),
-              ),
-            ),
-          ],
-
-          // Step 2: OTP
-          if (!showPhoneInput && state == TelegramAuthState.waitingForOtp) ...[
-            Text('Enter OTP Code', style: Theme.of(context).textTheme.labelLarge),
-            const SizedBox(height: AppSpacing.xs),
-            Text('Sent to ${widget.telegram.phone ?? _phoneController.text}',
-                style: Theme.of(context).textTheme.bodySmall),
-            const SizedBox(height: AppSpacing.sm + AppSpacing.xs),
-            TextField(
-              controller: _otpController,
-              keyboardType: TextInputType.number,
-              autofocus: true,
-              textAlign: TextAlign.center,
-              style: Theme.of(context).textTheme.headlineMedium?.copyWith(letterSpacing: 8),
-              inputFormatters: [
-                FilteringTextInputFormatter.digitsOnly,
-                LengthLimitingTextInputFormatter(6),
+          // Dynamic step forms
+          Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // Step 1: Phone
+              if (showPhoneInput) ...[
+                Text('Phone Number', style: Theme.of(context).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w600)),
+                const SizedBox(height: AppSpacing.sm),
+                TextField(
+                  controller: _phoneController,
+                  keyboardType: TextInputType.phone,
+                  inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[\d+ ]'))],
+                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+                  decoration: InputDecoration(
+                    hintText: '+1 202 555 0100',
+                    prefixIcon: Icon(Icons.phone_android, color: cs.primary),
+                    filled: true,
+                    fillColor: cs.surfaceContainerHigh,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(color: cs.primary, width: 2),
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+                  ),
+                ),
+                const SizedBox(height: AppSpacing.lg),
+                SizedBox(
+                  width: double.infinity,
+                  height: 52,
+                  child: FilledButton(
+                    onPressed: _loading ? null : _submitPhone,
+                    style: FilledButton.styleFrom(
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      elevation: 0,
+                    ),
+                    child: _loading
+                        ? const SizedBox(width: 24, height: 24,
+                            child: CircularProgressIndicator(strokeWidth: 2.5, color: Colors.white))
+                        : const Text('Send Verification Code', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+                  ),
+                ),
               ],
-              decoration: const InputDecoration(hintText: '• • • • • •'),
-            ),
-            const SizedBox(height: AppSpacing.md),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton(
-                onPressed: _loading ? null : _submitOtp,
-                child: _loading
-                    ? const SizedBox(width: 20, height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Text('Verify'),
-              ),
-            ),
-            const SizedBox(height: AppSpacing.sm),
-            Center(
-              child: TextButton(
-                onPressed: _loading ? null : () {
-                  setState(() {
-                    _forceShowPhone = true;
-                    _error = null;
-                  });
-                },
-                child: const Text('Change phone number'),
-              ),
-            ),
-          ],
 
-          // Step 3: 2FA
-          if (!showPhoneInput && state == TelegramAuthState.waitingFor2fa) ...[
-            Text('Two-Factor Password', style: Theme.of(context).textTheme.labelLarge),
-            const SizedBox(height: AppSpacing.sm),
-            TextField(
-              controller: _passwordController,
-              obscureText: true,
-              autofocus: true,
-              decoration: const InputDecoration(hintText: 'Enter your 2FA password'),
-            ),
-            const SizedBox(height: AppSpacing.md),
-            SizedBox(
-              width: double.infinity,
-              child: FilledButton(
-                onPressed: _loading ? null : _submit2fa,
-                child: _loading
-                    ? const SizedBox(width: 20, height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2))
-                    : const Text('Submit'),
-              ),
-            ),
-            const SizedBox(height: AppSpacing.sm),
-            Center(
-              child: TextButton(
-                onPressed: _loading ? null : () {
-                  setState(() {
-                    _forceShowPhone = true;
-                    _error = null;
-                  });
-                },
-                child: const Text('Change phone number'),
-              ),
-            ),
-          ],
+              // Step 2: OTP
+              if (!showPhoneInput && state == TelegramAuthState.waitingForOtp) ...[
+                Text('Enter OTP Code', style: Theme.of(context).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w600)),
+                const SizedBox(height: AppSpacing.xs),
+                Text('Sent to ${widget.telegram.phone ?? _phoneController.text}',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant.withOpacity(0.7))),
+                const SizedBox(height: AppSpacing.md),
+                TextField(
+                  controller: _otpController,
+                  keyboardType: TextInputType.number,
+                  autofocus: true,
+                  textAlign: TextAlign.center,
+                  style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                        letterSpacing: 12,
+                        fontWeight: FontWeight.bold,
+                        color: cs.primary,
+                      ),
+                  inputFormatters: [
+                    FilteringTextInputFormatter.digitsOnly,
+                    LengthLimitingTextInputFormatter(6),
+                  ],
+                  decoration: InputDecoration(
+                    hintText: '••••••',
+                    hintStyle: TextStyle(color: cs.onSurfaceVariant.withOpacity(0.3), letterSpacing: 12),
+                    filled: true,
+                    fillColor: cs.surfaceContainerHigh,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(color: cs.primary, width: 2),
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+                  ),
+                ),
+                const SizedBox(height: AppSpacing.lg),
+                SizedBox(
+                  width: double.infinity,
+                  height: 52,
+                  child: FilledButton(
+                    onPressed: _loading ? null : _submitOtp,
+                    style: FilledButton.styleFrom(
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      elevation: 0,
+                    ),
+                    child: _loading
+                        ? const SizedBox(width: 24, height: 24,
+                            child: CircularProgressIndicator(strokeWidth: 2.5, color: Colors.white))
+                        : const Text('Verify Code', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+                  ),
+                ),
+                const SizedBox(height: AppSpacing.sm),
+                Center(
+                  child: TextButton.icon(
+                    onPressed: _loading ? null : () {
+                      setState(() {
+                        _forceShowPhone = true;
+                        _error = null;
+                      });
+                    },
+                    icon: const Icon(Icons.edit_outlined, size: 16),
+                    label: const Text('Change phone number'),
+                  ),
+                ),
+              ],
+
+              // Step 3: 2FA
+              if (!showPhoneInput && state == TelegramAuthState.waitingFor2fa) ...[
+                Text('Two-Factor Password', style: Theme.of(context).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w600)),
+                const SizedBox(height: AppSpacing.sm),
+                TextField(
+                  controller: _passwordController,
+                  obscureText: true,
+                  autofocus: true,
+                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w500),
+                  decoration: InputDecoration(
+                    hintText: 'Enter your 2FA password',
+                    prefixIcon: Icon(Icons.lock_outline, color: cs.primary),
+                    filled: true,
+                    fillColor: cs.surfaceContainerHigh,
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide(color: cs.primary, width: 2),
+                    ),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+                  ),
+                ),
+                const SizedBox(height: AppSpacing.lg),
+                SizedBox(
+                  width: double.infinity,
+                  height: 52,
+                  child: FilledButton(
+                    onPressed: _loading ? null : _submit2fa,
+                    style: FilledButton.styleFrom(
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      elevation: 0,
+                    ),
+                    child: _loading
+                        ? const SizedBox(width: 24, height: 24,
+                            child: CircularProgressIndicator(strokeWidth: 2.5, color: Colors.white))
+                        : const Text('Submit Password', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+                  ),
+                ),
+                const SizedBox(height: AppSpacing.sm),
+                Center(
+                  child: TextButton.icon(
+                    onPressed: _loading ? null : () {
+                      setState(() {
+                        _forceShowPhone = true;
+                        _error = null;
+                      });
+                    },
+                    icon: const Icon(Icons.edit_outlined, size: 16),
+                    label: const Text('Change phone number'),
+                  ),
+                ),
+              ],
+            ],
+          ).animate(key: ValueKey(state)).fadeIn(duration: 250.ms).slideY(begin: 0.05, end: 0, curve: Curves.easeOut),
 
           const SizedBox(height: AppSpacing.sm),
         ],

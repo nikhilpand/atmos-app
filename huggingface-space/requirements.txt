@@ -1,5 +1,5 @@
 fastapi
-gradio
+gradio==5.31.0
 google-api-python-client
 google-auth
 google-auth-oauthlib

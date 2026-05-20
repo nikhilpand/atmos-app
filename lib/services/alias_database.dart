@@ -161,7 +161,10 @@ class AliasDatabase {
       apiKey = dotenv.env['GEMINI_API_KEY'];
     }
 
-    if (apiKey == 'AIzaSyCbfVje1oHISOW-VXZA_JjPofIthycdnmg' || apiKey == null || apiKey.isEmpty) {
+    if (apiKey == null ||
+        apiKey.isEmpty ||
+        apiKey == 'AIzaSyAOd7Mh1r08hgbKhbjZIO40pZ1WVeRcr-k' ||
+        apiKey == 'AIzaSyCbfVje1oHISOW-VXZA_JjPofIthycdnmg') {
       return [];
     }
 

@@ -76,7 +76,8 @@ class GeminiAiService {
       if (key == null || key.isEmpty) {
         key = dotenv.env['GEMINI_API_KEY'];
       }
-      if (key == 'AIzaSyCbfVje1oHISOW-VXZA_JjPofIthycdnmg') {
+      if (key == 'AIzaSyAOd7Mh1r08hgbKhbjZIO40pZ1WVeRcr-k' ||
+          key == 'AIzaSyCbfVje1oHISOW-VXZA_JjPofIthycdnmg') {
         return null;
       }
       return key;
@@ -150,7 +151,8 @@ Return ONLY valid JSON array.""";
         if (resp.statusCode == 200) {
           final data = jsonDecode(resp.body);
           final text = data['candidates']?[0]?['content']?['parts']?[0]?['text'] ?? '';
-          final parsed = jsonDecode(text.trim()) as List? ?? [];
+          final cleaned = _cleanJsonArrayResponse(text);
+          final parsed = jsonDecode(cleaned) as List? ?? [];
           return parsed.map((item) => GeminiRecommendation.fromJson(item as Map<String, dynamic>)).toList();
         } else {
           debugPrint('[GeminiAI] Direct Recommendations HTTP ${resp.statusCode}: ${resp.body}');
@@ -226,7 +228,8 @@ Return ONLY valid JSON.""";
         if (resp.statusCode == 200) {
           final data = jsonDecode(resp.body);
           final text = data['candidates']?[0]?['content']?['parts']?[0]?['text'] ?? '';
-          final parsed = jsonDecode(text.trim()) as List? ?? [];
+          final cleaned = _cleanJsonArrayResponse(text);
+          final parsed = jsonDecode(cleaned) as List? ?? [];
           return parsed.map((item) => GeminiCategory.fromJson(item as Map<String, dynamic>)).toList();
         } else {
           debugPrint('[GeminiAI] Direct Categories HTTP ${resp.statusCode}: ${resp.body}');
@@ -263,5 +266,27 @@ Return ONLY valid JSON.""";
       debugPrint('[GeminiAI] Categories error: $e');
     }
     return [];
+  }
+
+  String _cleanJsonArrayResponse(String raw) {
+    var cleaned = raw.trim();
+    if (cleaned.startsWith('```')) {
+      final lines = cleaned.split('\n');
+      if (lines.isNotEmpty && lines.first.startsWith('```')) {
+        lines.removeAt(0);
+      }
+      if (lines.isNotEmpty && lines.last.startsWith('```')) {
+        lines.removeLast();
+      }
+      cleaned = lines.join('\n').trim();
+    }
+    
+    final startIndex = cleaned.indexOf('[');
+    final endIndex = cleaned.lastIndexOf(']');
+    if (startIndex != -1 && endIndex != -1 && endIndex > startIndex) {
+      cleaned = cleaned.substring(startIndex, endIndex + 1);
+    }
+    
+    return cleaned;
   }
 }

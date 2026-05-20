@@ -108,9 +108,9 @@ class TmdbMedia {
   String get posterUrlLow =>
       posterPath != null ? 'https://image.tmdb.org/t/p/w185$posterPath' : '';
 
-  factory TmdbMedia.fromJson(Map<String, dynamic> json) {
+  factory TmdbMedia.fromJson(Map json) {
     final isMovie = json['media_type'] == 'movie' ||
-        json.containsKey('release_date') && !json.containsKey('first_air_date');
+        (json.containsKey('release_date') && !json.containsKey('first_air_date'));
     return TmdbMedia(
       id: json['id'],
       title: json['title'] ?? json['name'] ?? 'Unknown',
@@ -159,7 +159,7 @@ class TmdbDetails extends TmdbMedia {
     this.trailerKey,
   });
 
-  factory TmdbDetails.fromJson(Map<String, dynamic> json, MediaType type) {
+  factory TmdbDetails.fromJson(Map json, MediaType type) {
     // P11: Extract trailer key from videos appendix
     String? trailerKey;
     final videos = json['videos']?['results'] as List?;
@@ -183,11 +183,11 @@ class TmdbDetails extends TmdbMedia {
       mediaType: type,
       imdbId: json['imdb_id'] ?? json['external_ids']?['imdb_id'],
       genres: (json['genres'] as List? ?? [])
-          .map((g) => Genre.fromJson(g))
+          .map((g) => Genre.fromJson(g as Map))
           .toList(),
       seasons: (json['seasons'] as List? ?? [])
           .where((s) => s['season_number'] > 0)
-          .map((s) => Season.fromJson(s))
+          .map((s) => Season.fromJson(s as Map))
           .toList(),
       runtime: json['runtime'],
       status: json['status'],
@@ -195,7 +195,7 @@ class TmdbDetails extends TmdbMedia {
       numberOfEpisodes: json['number_of_episodes'],
       cast: ((json['credits']?['cast'] ?? []) as List)
           .take(15)
-          .map((c) => Cast.fromJson(c))
+          .map((c) => Cast.fromJson(c as Map))
           .toList(),
       voteCount: json['vote_count'] ?? 0,
       trailerKey: trailerKey,
@@ -210,7 +210,7 @@ class Genre {
   final int id;
   final String name;
   Genre({required this.id, required this.name});
-  factory Genre.fromJson(Map<String, dynamic> j) =>
+  factory Genre.fromJson(Map j) =>
       Genre(id: j['id'], name: j['name']);
 }
 
@@ -225,7 +225,7 @@ class Season {
     required this.episodeCount,
     this.posterPath,
   });
-  factory Season.fromJson(Map<String, dynamic> j) => Season(
+  factory Season.fromJson(Map j) => Season(
         seasonNumber: j['season_number'],
         name: j['name'],
         episodeCount: j['episode_count'],
@@ -255,7 +255,7 @@ class Episode {
   String get stillUrl =>
       stillPath != null ? 'https://image.tmdb.org/t/p/w300$stillPath' : '';
 
-  factory Episode.fromJson(Map<String, dynamic> j) => Episode(
+  factory Episode.fromJson(Map j) => Episode(
         episodeNumber: j['episode_number'],
         seasonNumber: j['season_number'],
         name: j['name'],
@@ -271,7 +271,7 @@ class Cast {
   final String? profilePath;
   final String character;
   Cast({required this.name, this.profilePath, required this.character});
-  factory Cast.fromJson(Map<String, dynamic> j) => Cast(
+  factory Cast.fromJson(Map j) => Cast(
         name: j['name'],
         profilePath: j['profile_path'],
         character: j['character'] ?? '',

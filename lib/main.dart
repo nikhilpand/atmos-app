@@ -215,8 +215,8 @@ GoRouter _buildRouter(bool onboardingDone, RecommendationService recService) {
         path: '/player',
         parentNavigatorKey: _rootNavigatorKey,
         pageBuilder: (context, state) {
-          final args = Map<String, dynamic>.from(
-              (state.extra as Map<String, dynamic>?) ?? const {});
+          final extra = state.extra;
+          final args = extra is Map ? Map<String, dynamic>.from(extra) : const <String, dynamic>{};
           return MaterialPage(child: NativePlayerScreen(args: args));
         },
       ),
@@ -226,8 +226,8 @@ GoRouter _buildRouter(bool onboardingDone, RecommendationService recService) {
         path: '/native-player',
         parentNavigatorKey: _rootNavigatorKey,
         pageBuilder: (context, state) {
-          final args = Map<String, dynamic>.from(
-              (state.extra as Map<String, dynamic>?) ?? const {});
+          final extra = state.extra;
+          final args = extra is Map ? Map<String, dynamic>.from(extra) : const <String, dynamic>{};
           return MaterialPage(child: NativePlayerScreen(args: args));
         },
       ),
@@ -238,7 +238,7 @@ GoRouter _buildRouter(bool onboardingDone, RecommendationService recService) {
         parentNavigatorKey: _rootNavigatorKey,
         pageBuilder: (context, state) {
           final genreId = int.tryParse(state.pathParameters['id']!) ?? 0;
-          final extra = (state.extra as Map<String, dynamic>?) ?? {};
+          final extra = state.extra is Map ? Map<String, dynamic>.from(state.extra as Map) : const <String, dynamic>{};
           final name = extra['name'] as String? ?? 'Genre';
           final emoji = extra['emoji'] as String? ?? '🎬';
           final typeStr = extra['type'] as String? ?? 'movie';

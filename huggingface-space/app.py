@@ -9,7 +9,7 @@ from typing import Dict, Any, Optional
 
 import requests
 import uvicorn
-from fastapi import FastAPI, HTTPException, Request, Header
+from fastapi import FastAPI, HTTPException, Header
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 import gradio as gr
@@ -158,13 +158,12 @@ def cleanup_loop():
         except Exception as e: logger.error(f"Cleanup: {e}")
         time.sleep(1800)
 
-# ── FastAPI startup ───────────────────────────────────────────────────────────
-@app.on_event("startup")
-def on_startup():
-    start_aria2()
-    threading.Thread(target=monitor_downloads_loop, daemon=True).start()
-    threading.Thread(target=cleanup_loop, daemon=True).start()
-    logger.info("All background threads started.")
+# ── Startup ───────────────────────────────────────────────────────────────────
+# Start background threads immediately at import time (HF Spaces pattern)
+start_aria2()
+threading.Thread(target=monitor_downloads_loop, daemon=True).start()
+threading.Thread(target=cleanup_loop, daemon=True).start()
+logger.info("All background threads started.")
 
 # ── Torrent Cache API ─────────────────────────────────────────────────────────
 @app.get("/api/health")
@@ -291,6 +290,9 @@ def manual_dl(magnet):
     with _tasks_lock: active_tasks[gid] = {"filename": "Querying...", "status": "active", "progress": 0}
     return f"Queued: `{gid}`"
 
+# ── Build the Gradio Blocks and mount onto FastAPI ────────────────────────────
+# Gradio is mounted at "/" so its assets are served correctly.
+# Our /api/* routes are registered first, so they take priority over Gradio's catch-all.
 with gr.Blocks(title="Atmos Backend") as demo:
     gr.Markdown("# Atmos Backend — Torrent Cache + AI")
     with gr.Tab("Status"):
@@ -304,7 +306,9 @@ with gr.Blocks(title="Atmos Backend") as demo:
         out = gr.Textbox(label="Result")
         btn.click(manual_dl, inputs=[inp], outputs=[out])
 
-demo_app = gr.mount_gradio_app(app, demo, path="/")
+# Mount Gradio at root — this must come AFTER all /api/* route registrations
+# so FastAPI matches our API routes first before falling through to Gradio.
+app = gr.mount_gradio_app(app, demo, path="/")
 
 if __name__ == "__main__":
-    uvicorn.run(demo_app, host="0.0.0.0", port=7860)
+    uvicorn.run(app, host="0.0.0.0", port=7860)

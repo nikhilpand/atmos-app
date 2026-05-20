@@ -61,6 +61,8 @@ class TelegramDownloadProgress {
 class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
   // Auto-reconnect tracking
   bool _reconnecting = false;
+  bool _isInitializing = false;
+  bool _isLoggingOut = false;
   int _reconnectAttempts = 0;
   static const _maxReconnectAttempts = 3;
   Timer? _reconnectTimer;
@@ -123,7 +125,8 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
   // ── Init / Dispose ────────────────────────────────────────────────────────
 
   Future<void> init() async {
-    if (_isInitialized) return;
+    if (_isInitialized || _isInitializing) return;
+    _isInitializing = true;
 
     try {
       final dir = await getApplicationSupportDirectory();
@@ -135,6 +138,7 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
       _clientId = td.TdPlugin.instance.tdCreateClientId();
       if (_clientId == null) {
         debugPrint('[Telegram] Failed to create TDLib client');
+        _isInitializing = false;
         return;
       }
 
@@ -159,6 +163,8 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
       _errorMessage = e.toString();
       _authState = TelegramAuthState.error;
       notifyListeners();
+    } finally {
+      _isInitializing = false;
     }
   }
 
@@ -187,16 +193,18 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
       }
     } else if (state == AppLifecycleState.resumed) {
       // Auto-reconnect on app resume if TDLib disconnected while in background
-      if (!_isInitialized || _authState == TelegramAuthState.uninitialized || _authState == TelegramAuthState.error) {
-        debugPrint('[Telegram] App resumed — TDLib disconnected, attempting auto-reconnect...');
-        _attemptReconnect();
+      if (!_isInitialized && !_isInitializing && !_reconnecting) {
+        if (_authState == TelegramAuthState.uninitialized || _authState == TelegramAuthState.error) {
+          debugPrint('[Telegram] App resumed — TDLib disconnected, attempting auto-reconnect...');
+          _attemptReconnect();
+        }
       }
     }
   }
 
   /// Attempt to re-initialize TDLib connection with exponential backoff.
   Future<void> _attemptReconnect() async {
-    if (_reconnecting) return;
+    if (_reconnecting || _isInitializing) return;
     _reconnecting = true;
     _reconnectAttempts = 0;
     _clearPendingRequests('Reconnecting client');
@@ -326,6 +334,7 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
   /// Logout.
   Future<void> logout() async {
     _authState = TelegramAuthState.loggingOut;
+    _isLoggingOut = true;
     notifyListeners();
     try {
       await _sendRequest(const td.LogOut());
@@ -812,14 +821,18 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
         _authState = TelegramAuthState.uninitialized;
         _isInitialized = false;
         debugPrint('[Telegram] ⚠️ TDLib session closed — will auto-reconnect on next operation');
-        // Schedule auto-reconnect after a brief delay
-        _reconnectTimer?.cancel();
-        _reconnectTimer = Timer(const Duration(seconds: 2), () {
-          if (!isLoggedIn && !_reconnecting) {
-            debugPrint('[Telegram] Auto-reconnecting after AuthorizationStateClosed...');
-            _attemptReconnect();
-          }
-        });
+        if (!_isLoggingOut) {
+          // Schedule auto-reconnect after a brief delay
+          _reconnectTimer?.cancel();
+          _reconnectTimer = Timer(const Duration(seconds: 2), () {
+            if (!isLoggedIn && !_reconnecting && !_isLoggingOut) {
+              debugPrint('[Telegram] Auto-reconnecting after AuthorizationStateClosed...');
+              _attemptReconnect();
+            }
+          });
+        } else {
+          _isLoggingOut = false; // Reset flag
+        }
         break;
       default:
         break;

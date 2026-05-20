@@ -681,7 +681,8 @@ void main() {
         d: 'first=${_ms(sw1.elapsed)} second=${_ms(sw2.elapsed)} servers=${ex.getAvailableServers(key).length}'));
     }, timeout: const Timeout(Duration(seconds: 40)));
 
-    test('parallel extractFromProvider for all 6 providers completes without deadlock', () async {
+    test('parallel extractFromProvider for all providers completes without deadlock', () async {
+      final count = StreamExtractorService.availableProviders.length;
       final sw = Stopwatch()..start();
       final futures = StreamExtractorService.availableProviders.map((p) =>
         ex.extractFromProvider(
@@ -695,12 +696,12 @@ void main() {
       sw.stop();
 
       final successes = results.whereType<ExtractedStream>().toList();
-      _rec(_R(g: g, t: '6-provider parallel no deadlock',
+      _rec(_R(g: g, t: 'all-provider parallel no deadlock',
         s: _S.pass, // no deadlock = pass regardless of results
-        d: '${successes.length}/6 providers succeeded ${_ms(sw.elapsed)}'));
+        d: '${successes.length}/$count providers succeeded ${_ms(sw.elapsed)}'));
 
       // Must finish without exception/deadlock
-      expect(results.length, equals(6));
+      expect(results.length, equals(count));
     }, timeout: const Timeout(Duration(seconds: 20)));
   });
 
