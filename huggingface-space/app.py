@@ -10,7 +10,7 @@ from typing import Dict, Any, Optional
 import requests
 import uvicorn
 from fastapi import FastAPI, HTTPException, Header
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, RedirectResponse
 from fastapi.middleware.cors import CORSMiddleware
 import gradio as gr
 
@@ -306,9 +306,13 @@ with gr.Blocks(title="Atmos Backend") as demo:
         out = gr.Textbox(label="Result")
         btn.click(manual_dl, inputs=[inp], outputs=[out])
 
-# Mount Gradio at root — this must come AFTER all /api/* route registrations
+@app.get("/")
+async def root_redirect():
+    return RedirectResponse(url="/dashboard")
+
+# Mount Gradio at /dashboard — this must come AFTER all /api/* route registrations
 # so FastAPI matches our API routes first before falling through to Gradio.
-app = gr.mount_gradio_app(app, demo, path="/")
+app = gr.mount_gradio_app(app, demo, path="/dashboard")
 
 if __name__ == "__main__":
     uvicorn.run(app, host="0.0.0.0", port=7860)
