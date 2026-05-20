@@ -15,6 +15,7 @@ import 'services/telegram_service.dart';
 import 'services/recommendation_service.dart';
 import 'services/watchlist_service.dart';
 import 'services/tmdb_service.dart';
+import 'services/alias_database.dart';
 import 'models/download_source.dart';
 import 'models/media_model.dart';
 import 'providers/providers.dart';
@@ -76,6 +77,7 @@ void main() async {
       recommendationService.init(),
       watchlistService.init(),
       tmdbService.initCache(),
+      AliasDatabase.init(),
     ]);
 
     // Telegram init touches network/TDLib and blocks. Push it to background.

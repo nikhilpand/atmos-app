@@ -101,14 +101,20 @@ class AtmosTheme {
         indicatorColor: scheme.secondaryContainer,
       ),
 
-      // Navigation bar (phone bottom bar)
+      // Navigation bar (phone bottom bar) — M3 Expressive pill indicator
       navigationBarTheme: NavigationBarThemeData(
         backgroundColor: scheme.surfaceContainerLow,
+        // Pill-shaped active indicator (Android 16 / M3 Expressive)
         indicatorColor: scheme.secondaryContainer,
+        indicatorShape: const StadiumBorder(),
+        // Smooth animated height
+        height: 72,
+        labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
         iconTheme: WidgetStateProperty.resolveWith((states) => IconThemeData(
           color: states.contains(WidgetState.selected)
               ? scheme.onSecondaryContainer
               : scheme.onSurfaceVariant,
+          size: states.contains(WidgetState.selected) ? 26 : 24,
         )),
         labelTextStyle: WidgetStateProperty.resolveWith((states) => GoogleFonts.outfit(
           color: states.contains(WidgetState.selected)
@@ -117,6 +123,8 @@ class AtmosTheme {
           fontWeight: states.contains(WidgetState.selected)
               ? FontWeight.w600
               : FontWeight.w400,
+          fontSize: 11,
+          letterSpacing: 0.2,
         )),
       ),
 
@@ -253,10 +261,12 @@ class AtmosTheme {
       focusColor: scheme.primary.withValues(alpha: 0.15),
       splashFactory: InkSparkle.splashFactory,
 
-      // M3 Expressive page transitions
+      // M3 Expressive page transitions (Android 16 predictive back + spring)
       pageTransitionsTheme: const PageTransitionsTheme(
         builders: {
-          TargetPlatform.android: ZoomPageTransitionsBuilder(
+          TargetPlatform.android: PredictiveBackPageTransitionsBuilder(),
+          TargetPlatform.iOS:     CupertinoPageTransitionsBuilder(),
+          TargetPlatform.linux:   ZoomPageTransitionsBuilder(
             allowEnterRouteSnapshotting: false,
           ),
         },

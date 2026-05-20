@@ -46,6 +46,7 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
   final Map<String, ProviderStatus> _providerStatuses = {};
   String? _currentProviderName; // Currently playing provider
   String? _preferredProvider; // User-selected server
+  String _contentKey = ''; // Key for instant server cache lookup
 
   // Double-tap seek animation
   int? _seekDirection;
@@ -61,6 +62,10 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
   ExtractedStream? _currentStream;
   dynamic _activeSubtitle = -1; // -1 = off, can be int (extracted) or SubtitleTrack (embedded)
   String _activeQuality = '';
+  bool _autoQualityEnabled = true;
+  Timer? _adaptiveTimer;
+  int _lowBufferTicks = 0;
+  int _highBufferTicks = 0;
 
   // Vertical gesture (brightness/volume)
   bool _isDraggingVertical = false;
@@ -123,6 +128,7 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
 
     _player = Player();
     _controller = VideoController(_player);
+    _configurePlayerSettings();
 
     // Load saved preferences
     SharedPreferences.getInstance().then((prefs) {
@@ -151,6 +157,7 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
 
   @override
   void dispose() {
+    _cancelAdaptiveTimer();
     _progressTimer?.cancel();
     _controlsTimer?.cancel();
     _seekAnimTimer?.cancel();
@@ -217,7 +224,15 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
 
   // ── Extraction ──
 
-  Future<void> _startExtraction() async {
+  Future<void> _startExtraction({bool forceRetry = false}) async {
+    // Content key must be set before any async work
+    _contentKey = '${_imdbId}_${_tmdbId}_${_type}_${_season}_$_episode';
+
+    // On forced retry (Retry button), wipe the cache so providers re-race
+    if (forceRetry) {
+      _extractor.clearCache(_contentKey);
+    }
+
     setState(() {
       _state = _ExState.extracting;
       _statusMsg = 'Finding best stream…';
@@ -290,25 +305,28 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
     });
   }
 
-  /// Re-race all providers excluding the current one — picks the fastest new source
+  /// Try another source. If background cache has alternatives, shows instant picker.
+  /// If nothing is cached yet, re-races all providers (re-extraction).
   Future<void> _tryAnotherSource() async {
-    final current = _currentProviderName ?? '';
-    final pos = _player.state.position;
+    // ── Show server picker — it handles both cached and pending providers ──
+    final cachedCount = _extractor.getAvailableServers(_contentKey).length;
+    if (cachedCount >= 1 || _state == _ExState.playing) {
+      // At least one server is available or we are already playing
+      await _showServerPickerSheet();
+      return;
+    }
 
+    // ── Nothing resolved at all — re-race all providers ──
+    final pos = _state == _ExState.playing ? _player.state.position : Duration.zero;
+    _extractor.clearCache(_contentKey); // force fresh race
     setState(() {
       _state = _ExState.extracting;
       _statusMsg = 'Finding best source…';
-      // Reset pills — all back to trying
       for (final p in StreamExtractorService.availableProviders) {
         _providerStatuses[p] = ProviderStatus.idle;
       }
     });
 
-    // Extract the base provider name (strip quality suffix like "VidAPI (HD)")
-    final currentBase = StreamExtractorService.availableProviders
-        .firstWhere((p) => current.startsWith(p), orElse: () => '');
-
-    // Re-run the parallel race, skipping only the current provider
     final result = await _extractor.extractWithStatus(
       imdbId: _imdbId,
       tmdbId: _tmdbId,
@@ -316,10 +334,8 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
       title: _title,
       season: _season,
       episode: _episode,
-      // Pass current as preferred=null so race picks the next fastest
       onStatus: (name, status) {
         if (!mounted) return;
-        // Don't override success status from a previous winner
         if (_providerStatuses[name] == ProviderStatus.success) return;
         setState(() => _providerStatuses[name] = status);
       },
@@ -327,22 +343,231 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
 
     if (!mounted) return;
 
-    if (result != null && !result.providerName.startsWith(currentBase)) {
+    if (result != null) {
       _currentProviderName = result.providerName;
-      _playStream(result, resumeFrom: pos);
-    } else if (result != null) {
-      // Same provider came back — still play it (best we can do)
-      _currentProviderName = result.providerName;
-      _playStream(result, resumeFrom: pos);
+      _playStream(result, resumeFrom: pos.inSeconds > 0 ? pos : null);
     } else if (_currentStream != null) {
-      // Nothing worked — resume current stream
-      _playStream(_currentStream!, resumeFrom: pos);
+      _playStream(_currentStream!, resumeFrom: pos.inSeconds > 0 ? pos : null);
     } else {
       setState(() {
         _state = _ExState.failed;
         _failedMsg = 'No other sources available.';
       });
     }
+  }
+
+  /// Instantly switch to a server from the background resolution cache.
+  void _switchToServer(String provider) {
+    final cached = _extractor.getResolvedStream(_contentKey, provider);
+    final pos = _state == _ExState.playing ? _player.state.position : Duration.zero;
+    if (cached == null) {
+      // Not yet resolved — trigger extraction for this specific provider
+      _extractAndSwitchTo(provider);
+      return;
+    }
+    _currentProviderName = cached.providerName;
+    setState(() {
+      _preferredProvider = provider;
+      _providerStatuses[provider] = ProviderStatus.success;
+    });
+    _playStream(cached, resumeFrom: pos.inSeconds > 0 ? pos : null);
+  }
+
+  Future<void> _extractAndSwitchTo(String provider) async {
+    final pos = _state == _ExState.playing ? _player.state.position : Duration.zero;
+    if (!mounted) return;
+    setState(() => _providerStatuses[provider] = ProviderStatus.trying);
+    final result = await _extractor.extractFromProvider(
+      providerName: provider,
+      imdbId: _imdbId, tmdbId: _tmdbId, type: _type,
+      title: _title, season: _season, episode: _episode,
+    );
+    if (!mounted) return;
+    if (result != null) {
+      setState(() => _providerStatuses[provider] = ProviderStatus.success);
+      _currentProviderName = result.providerName;
+      _playStream(result, resumeFrom: pos.inSeconds > 0 ? pos : null);
+    } else {
+      setState(() => _providerStatuses[provider] = ProviderStatus.failed);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('$provider failed to load. Try another server.'),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 3),
+        ),
+      );
+    }
+  }
+
+  /// Show the server picker bottom sheet (instant switch from cache).
+  /// Uses a ValueNotifier so the sheet rebuilds as background providers resolve.
+  Future<void> _showServerPickerSheet() async {
+    if (!mounted) return;
+
+    // Snapshot the current statuses — the ValueNotifier will push updates
+    final statusNotifier = ValueNotifier<Map<String, ProviderStatus>>(
+      Map.from(_providerStatuses),
+    );
+
+    // Subscribe to background status changes while sheet is open
+    // We poll every 500ms to keep the sheet in sync
+    Timer? pollTimer;
+    pollTimer = Timer.periodic(const Duration(milliseconds: 500), (_) {
+      if (!mounted) { pollTimer?.cancel(); return; }
+      statusNotifier.value = Map.from(_providerStatuses);
+    });
+
+    await showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: Colors.transparent,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (sheetCtx) => ClipRRect(
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        child: BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 24, sigmaY: 24),
+          child: Container(
+            decoration: BoxDecoration(
+              color: Colors.black.withValues(alpha: 0.88),
+              borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+              border: Border.all(color: Colors.white10),
+            ),
+            child: SafeArea(
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Center(
+                      child: Container(
+                        width: 36, height: 4,
+                        decoration: BoxDecoration(
+                          color: Colors.white24,
+                          borderRadius: BorderRadius.circular(2),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      children: [
+                        const Text('Switch Server',
+                          style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w700)),
+                        const Spacer(),
+                        // Live indicator: how many resolved
+                        ValueListenableBuilder<Map<String, ProviderStatus>>(
+                          valueListenable: statusNotifier,
+                          builder: (_, statuses, __) {
+                            final resolved = statuses.values.where((s) => s == ProviderStatus.success).length;
+                            final total = StreamExtractorService.availableProviders.length;
+                            return Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                              decoration: BoxDecoration(
+                                color: resolved > 0
+                                    ? Colors.greenAccent.withValues(alpha: 0.15)
+                                    : Colors.white10,
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              child: Text(
+                                '$resolved/$total ready',
+                                style: TextStyle(
+                                  color: resolved > 0 ? Colors.greenAccent : Colors.white38,
+                                  fontSize: 11, fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    const Text('Tap a server to switch instantly.',
+                      style: TextStyle(color: Colors.white38, fontSize: 11)),
+                    const SizedBox(height: 16),
+                    ValueListenableBuilder<Map<String, ProviderStatus>>(
+                      valueListenable: statusNotifier,
+                      builder: (_, statuses, __) => Wrap(
+                        spacing: 10, runSpacing: 10,
+                        children: StreamExtractorService.availableProviders.map((p) {
+                          final status = statuses[p] ?? ProviderStatus.idle;
+                          final isActive = (_currentProviderName ?? '').startsWith(p);
+                          final isCached = _extractor.getResolvedStream(_contentKey, p) != null;
+                          final Color bg, border;
+                          if (isActive) {
+                            bg = const Color(0xFF7C3AED);
+                            border = Colors.purpleAccent;
+                          } else if (status == ProviderStatus.success || isCached) {
+                            bg = Colors.white.withValues(alpha: 0.12);
+                            border = Colors.white38;
+                          } else if (status == ProviderStatus.trying) {
+                            bg = Colors.deepPurple.withValues(alpha: 0.2);
+                            border = Colors.deepPurpleAccent;
+                          } else if (status == ProviderStatus.failed) {
+                            bg = Colors.red.withValues(alpha: 0.1);
+                            border = Colors.red.withValues(alpha: 0.3);
+                          } else {
+                            bg = Colors.white.withValues(alpha: 0.06);
+                            border = Colors.white12;
+                          }
+                          return GestureDetector(
+                            onTap: status == ProviderStatus.failed ? null : () {
+                              Navigator.pop(sheetCtx);
+                              _switchToServer(p);
+                            },
+                            child: AnimatedContainer(
+                              duration: const Duration(milliseconds: 200),
+                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+                              decoration: BoxDecoration(
+                                color: bg,
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(color: border, width: isActive ? 1.5 : 0.8),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  if (status == ProviderStatus.trying)
+                                    const SizedBox(width: 12, height: 12,
+                                      child: CircularProgressIndicator(strokeWidth: 1.5, color: Colors.deepPurpleAccent))
+                                  else if (status == ProviderStatus.success || isCached)
+                                    const Icon(Icons.check_circle_rounded, color: Colors.greenAccent, size: 13)
+                                  else if (status == ProviderStatus.failed)
+                                    const Icon(Icons.cancel_rounded, color: Colors.redAccent, size: 13)
+                                  else
+                                    const Icon(Icons.circle_outlined, color: Colors.white24, size: 13),
+                                  const SizedBox(width: 6),
+                                  Text(p,
+                                    style: TextStyle(
+                                      color: isActive ? Colors.white
+                                          : (status == ProviderStatus.failed ? Colors.white24 : Colors.white70),
+                                      fontWeight: isActive ? FontWeight.w700 : FontWeight.w500,
+                                      fontSize: 13,
+                                    ),
+                                  ),
+                                  if (isActive) ...[
+                                    const SizedBox(width: 5),
+                                    const Icon(Icons.play_circle_filled_rounded, color: Colors.white70, size: 11),
+                                  ],
+                                ],
+                              ),
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+
+    pollTimer.cancel();
+    statusNotifier.dispose();
   }
 
   // ── Download current stream ──
@@ -437,9 +662,8 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
       _statusMsg = 'Playing via ${stream.providerName}';
       _providerBadge = stream.providerName;
       _currentStream = stream;
-      if (_activeQuality.isEmpty && stream.hasQualities) {
-        _activeQuality = stream.qualities.first.quality;
-      }
+      // Reset quality badge on every server switch so it reflects the new provider
+      _activeQuality = stream.hasQualities ? stream.qualities.first.quality : '';
     });
 
     await _player.open(Media(
@@ -447,12 +671,31 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
       httpHeaders: stream.headers,
     ));
 
-    // Resume position if switching quality
-    if (resumeFrom != null && resumeFrom.inSeconds > 0) {
-      // Wait for player to be ready then seek
-      await Future.delayed(const Duration(milliseconds: 500));
-      await _player.seek(resumeFrom);
+    // ── Event-driven seek (robust): wait for first buffering event then seek ──
+    // This avoids the fragile 500ms blind delay that fails on slow networks.
+    if (resumeFrom != null && resumeFrom.inSeconds > 2) {
+      StreamSubscription<Duration>? seekSub;
+      seekSub = _player.stream.buffer.listen((buf) async {
+        if (buf.inMilliseconds > 0) {
+          await seekSub?.cancel();
+          seekSub = null;
+          if (!mounted) return;
+          await _player.seek(resumeFrom);
+          debugPrint('[Player] Seeked to ${resumeFrom.inSeconds}s after buffer ready');
+        }
+      });
+      // Safety timeout — seek anyway after 4s if buffer event never fires
+      Future.delayed(const Duration(seconds: 4), () async {
+        if (seekSub != null) {
+          await seekSub!.cancel();
+          if (mounted && _state == _ExState.playing) {
+            await _player.seek(resumeFrom);
+          }
+        }
+      });
     }
+
+    _initAdaptiveTimer();
 
     // Start periodic position saver (every 10s)
     _startProgressTimer();
@@ -514,6 +757,12 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
               player: _player,
               stream: _currentStream,
               activeQuality: _activeQuality,
+              autoQualityEnabled: _autoQualityEnabled,
+              onAutoQualitySelect: () {
+                setState(() => _autoQualityEnabled = true);
+                _initAdaptiveTimer();
+                Navigator.pop(context);
+              },
               activeSubtitle: _activeSubtitle,
               imdbId: _imdbId,
               mediaType: _type,
@@ -554,7 +803,7 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
 
   // ── Quality control ──
 
-  void _switchQuality(QualityOption quality) {
+  void _switchQuality(QualityOption quality, {bool isAutoSwitch = false}) {
     // B2: Compare quality.url against quality.url (not the current stream URL),
     // and update _currentStream after switch so the 2nd switch works correctly.
     if (_currentStream == null) return;
@@ -564,8 +813,13 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
         .url;
     if (quality.url == currentQualityUrl) return;
 
+    if (!isAutoSwitch) {
+      _autoQualityEnabled = false;
+      _cancelAdaptiveTimer();
+    }
+
     final currentPos = _player.state.position;
-    debugPrint('[Player] Switching to ${quality.quality} at ${currentPos.inSeconds}s');
+    debugPrint('[Player] Switching to ${quality.quality} (Auto: $isAutoSwitch) at ${currentPos.inSeconds}s');
 
     final newStream = ExtractedStream(
       url: quality.url,
@@ -584,6 +838,121 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
         _toggleSubtitle(_activeSubtitle);
       });
     }
+  }
+
+  Future<void> _configurePlayerSettings() async {
+    try {
+      final platform = _player.platform;
+      if (platform is NativePlayer) {
+        await platform.setProperty('cache', 'yes');
+        await platform.setProperty('demuxer-max-bytes', '67108864'); // 64 MB
+        await platform.setProperty('demuxer-max-back-bytes', '33554432'); // 32 MB
+        await platform.setProperty('cache-secs', '60');
+        await platform.setProperty('demuxer-readahead-secs', '60');
+        await platform.setProperty('hwdec', 'auto-safe');
+        await platform.setProperty('network-timeout', '10');
+        await platform.setProperty('demuxer-lavf-probesize', '5000000');
+        await platform.setProperty('demuxer-lavf-analyzeduration', '5000000');
+        debugPrint('[Player] Configured optimal cache & streaming properties');
+      }
+    } catch (e) {
+      debugPrint('[Player] Failed to set MPV properties: $e');
+    }
+  }
+
+  void _initAdaptiveTimer() {
+    _cancelAdaptiveTimer();
+    _lowBufferTicks = 0;
+    _highBufferTicks = 0;
+
+    if (!_autoQualityEnabled) return;
+    if (_currentStream == null || _currentStream!.qualities.length <= 1) return;
+
+    _adaptiveTimer = Timer.periodic(const Duration(seconds: 4), (timer) async {
+      if (!mounted) return;
+      if (_state != _ExState.playing) return;
+
+      final platform = _player.platform;
+      if (platform is NativePlayer) {
+        try {
+          final cacheDurStr = await platform.getProperty('demuxer-cache-duration');
+          final cacheDur = double.tryParse(cacheDurStr.toString()) ?? 10.0;
+
+          debugPrint('[Player] Adaptive Quality Check: Cache duration = ${cacheDur.toStringAsFixed(2)}s, buffering = $_isBuffering');
+
+          if (cacheDur < 4.0 || _isBuffering) {
+            _lowBufferTicks++;
+            _highBufferTicks = 0;
+            if (_lowBufferTicks >= 2) {
+              debugPrint('[Player] Low buffer detected! Downshifting quality...');
+              _downgradeQuality();
+              _lowBufferTicks = 0;
+            }
+          } else if (cacheDur > 20.0) {
+            _highBufferTicks++;
+            _lowBufferTicks = 0;
+            if (_highBufferTicks >= 6) { // 24 seconds of safe buffer
+              debugPrint('[Player] High buffer detected! Upshifting quality...');
+              _upgradeQuality();
+              _highBufferTicks = 0;
+            }
+          } else {
+            _lowBufferTicks = 0;
+            _highBufferTicks = 0;
+          }
+        } catch (e) {
+          debugPrint('[Player] Adaptive quality timer error: $e');
+        }
+      }
+    });
+  }
+
+  void _cancelAdaptiveTimer() {
+    _adaptiveTimer?.cancel();
+    _adaptiveTimer = null;
+  }
+
+  int _qualityOrder(String quality) {
+    final q = quality.toLowerCase();
+    if (q.contains('4k') || q.contains('2160')) return 0;
+    if (q.contains('1080')) return 1;
+    if (q.contains('720')) return 2;
+    if (q.contains('480')) return 3;
+    return 99;
+  }
+
+  void _downgradeQuality() {
+    if (_currentStream == null) return;
+    final qualities = List<QualityOption>.from(_currentStream!.qualities);
+    // Sort descending by quality (e.g. 1080p, 720p, 480p)
+    qualities.sort((a, b) => _qualityOrder(b.quality).compareTo(_qualityOrder(a.quality)));
+
+    final currentIndex = qualities.indexWhere((q) => q.quality == _activeQuality);
+    if (currentIndex == -1 || currentIndex >= qualities.length - 1) {
+      debugPrint('[Player] Already at lowest quality or active quality not found.');
+      return;
+    }
+
+    final nextQuality = qualities[currentIndex + 1];
+    debugPrint('[Player] Auto-downgrading quality from $_activeQuality to ${nextQuality.quality}');
+    _switchQuality(nextQuality, isAutoSwitch: true);
+  }
+
+  void _upgradeQuality() {
+    if (_currentStream == null) return;
+    final qualities = List<QualityOption>.from(_currentStream!.qualities);
+    // Sort descending by quality (e.g. 1080p, 720p, 480p)
+    qualities.sort((a, b) => _qualityOrder(b.quality).compareTo(_qualityOrder(a.quality)));
+
+    final currentIndex = qualities.indexWhere((q) => q.quality == _activeQuality);
+    if (currentIndex <= 0) {
+      debugPrint('[Player] Already at highest quality or active quality not found.');
+      return;
+    }
+
+    final nextQuality = qualities[currentIndex - 1];
+    debugPrint('[Player] Auto-upgrading quality from $_activeQuality to ${nextQuality.quality}');
+    _switchQuality(nextQuality, isAutoSwitch: true);
   }
 
 
@@ -646,7 +1015,8 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
     if (!mounted) return;
     // B1: Use local state instead of mutating widget.args
     setState(() => _episodeOverride = _episode + 1);
-    _startExtraction();
+    // New episode = new content key = must force fresh extraction
+    _startExtraction(forceRetry: true);
   }
 
   // ── Controls ──
@@ -999,7 +1369,8 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
                     child: _StatusOverlay(
                       state: _state,
                       message: _state == _ExState.failed ? (_failedMsg ?? 'Unknown error') : _statusMsg,
-                      onRetry: _state == _ExState.failed ? _startExtraction : null,
+                      onRetry: _state == _ExState.failed ? () => _startExtraction(forceRetry: true) : null,
+                       onSwitchSource: _state == _ExState.failed ? _tryAnotherSource : null,
                       providerStatuses: _providerStatuses,
                     ),
                   ),
@@ -1104,12 +1475,14 @@ class _StatusOverlay extends StatelessWidget {
   final _ExState state;
   final String message;
   final VoidCallback? onRetry;
+  final VoidCallback? onSwitchSource;
   final Map<String, ProviderStatus> providerStatuses;
 
   const _StatusOverlay({
     required this.state,
     required this.message,
     this.onRetry,
+    this.onSwitchSource,
     this.providerStatuses = const {},
   });
 
@@ -1157,17 +1530,36 @@ class _StatusOverlay extends StatelessWidget {
                   textAlign: TextAlign.center,
                 ),
                 const SizedBox(height: 28),
-                if (onRetry != null)
-                  FilledButton.icon(
-                    onPressed: onRetry,
-                    icon: const Icon(Icons.refresh, size: 18),
-                    label: const Text('Retry'),
-                    style: FilledButton.styleFrom(
-                      backgroundColor: Colors.white,
-                      foregroundColor: Colors.black,
-                      padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 12),
-                    ),
-                  ),
+                // Both Retry (fresh race) and Switch Server buttons
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (onSwitchSource != null) ...[
+                      OutlinedButton.icon(
+                        onPressed: onSwitchSource,
+                        icon: const Icon(Icons.dns_rounded, size: 16),
+                        label: const Text('Switch Server'),
+                        style: OutlinedButton.styleFrom(
+                          foregroundColor: Colors.white70,
+                          side: const BorderSide(color: Colors.white24),
+                          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+                        ),
+                      ),
+                      const SizedBox(width: 12),
+                    ],
+                    if (onRetry != null)
+                      FilledButton.icon(
+                        onPressed: onRetry,
+                        icon: const Icon(Icons.refresh, size: 18),
+                        label: const Text('Retry'),
+                        style: FilledButton.styleFrom(
+                          backgroundColor: Colors.white,
+                          foregroundColor: Colors.black,
+                          padding: const EdgeInsets.symmetric(horizontal: 28, vertical: 12),
+                        ),
+                      ),
+                  ],
+                ),
               ],
             ],
           ),
@@ -1186,48 +1578,67 @@ class _ProviderPill extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final (Color bg, Color fg, IconData? icon) = switch (status) {
-      ProviderStatus.idle    => (Colors.white10, Colors.white38, null),
-      ProviderStatus.trying  => (Colors.deepPurpleAccent.withValues(alpha: 0.2), Colors.deepPurpleAccent, null),
-      ProviderStatus.success => (Colors.green.withValues(alpha: 0.2), Colors.greenAccent, Icons.check_circle_rounded),
-      ProviderStatus.failed  => (Colors.red.withValues(alpha: 0.15), Colors.redAccent.withValues(alpha: 0.7), Icons.cancel_rounded),
+    final (Color bg, Color fg, Color border) = switch (status) {
+      ProviderStatus.idle    => (Colors.white.withValues(alpha: 0.06), Colors.white30, Colors.white10),
+      ProviderStatus.trying  => (Colors.deepPurple.withValues(alpha: 0.25), Colors.deepPurpleAccent, Colors.deepPurpleAccent.withValues(alpha: 0.5)),
+      ProviderStatus.success => (Colors.green.withValues(alpha: 0.18), Colors.greenAccent, Colors.greenAccent.withValues(alpha: 0.4)),
+      ProviderStatus.failed  => (Colors.red.withValues(alpha: 0.12), Colors.redAccent.withValues(alpha: 0.6), Colors.red.withValues(alpha: 0.25)),
     };
 
+    Widget? statusWidget;
+    if (status == ProviderStatus.trying) {
+      statusWidget = const SizedBox(
+        width: 10, height: 10,
+        child: CircularProgressIndicator(
+          color: Colors.deepPurpleAccent,
+          strokeWidth: 1.5,
+        ),
+      );
+    } else if (status == ProviderStatus.success) {
+      statusWidget = const Icon(Icons.check_circle_rounded, size: 12, color: Colors.greenAccent);
+    } else if (status == ProviderStatus.failed) {
+      statusWidget = Icon(Icons.cancel_rounded, size: 12, color: Colors.redAccent.withValues(alpha: 0.7));
+    }
+
     return AnimatedContainer(
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeOut,
+      // M3 Expressive emphasizedDecelerate spring (cubic 0.05, 0.7, 0.1, 1.0)
+      duration: const Duration(milliseconds: 400),
+      curve: const Cubic(0.05, 0.7, 0.1, 1.0),
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(
         color: bg,
         borderRadius: BorderRadius.circular(20),
-        border: status == ProviderStatus.trying
-            ? Border.all(color: Colors.deepPurpleAccent.withValues(alpha: 0.4), width: 1)
-            : null,
+        border: Border.all(color: border, width: 0.8),
       ),
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          if (status == ProviderStatus.trying)
-            const Padding(
-              padding: EdgeInsets.only(right: 6),
-              child: SizedBox(
-                width: 10, height: 10,
-                child: CircularProgressIndicator(color: Colors.deepPurpleAccent, strokeWidth: 1.5),
-              ),
+          AnimatedSwitcher(
+            duration: const Duration(milliseconds: 250),
+            transitionBuilder: (child, anim) => ScaleTransition(
+              scale: anim, child: FadeTransition(opacity: anim, child: child)),
+            child: statusWidget != null
+                ? Padding(
+                    key: ValueKey(status),
+                    padding: const EdgeInsets.only(right: 5),
+                    child: statusWidget,
+                  )
+                : const SizedBox.shrink(key: ValueKey('none')),
+          ),
+          Text(name,
+            style: TextStyle(
+              color: fg,
+              fontSize: 11,
+              fontWeight: status == ProviderStatus.idle ? FontWeight.w400 : FontWeight.w600,
             ),
-          if (icon != null)
-            Padding(
-              padding: const EdgeInsets.only(right: 4),
-              child: Icon(icon, size: 12, color: fg),
-            ),
-          Text(name, style: TextStyle(color: fg, fontSize: 11, fontWeight: FontWeight.w600)),
+          ),
         ],
       ),
     );
   }
 }
 
-// P5: Properly looping pulsing spinner using AnimationController.repeat()
+// P5: Premium orbital pulsing spinner — dual-ring with inner shimmer
 class _PulsingSpinner extends StatefulWidget {
   const _PulsingSpinner();
   @override
@@ -1235,44 +1646,103 @@ class _PulsingSpinner extends StatefulWidget {
 }
 
 class _PulsingSpinnerState extends State<_PulsingSpinner>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _ctrl;
-  late final Animation<double> _opacity;
+    with TickerProviderStateMixin {
+  late final AnimationController _spinCtrl;
+  late final AnimationController _pulseCtrl;
+  late final Animation<double> _pulse;
 
   @override
   void initState() {
     super.initState();
-    _ctrl = AnimationController(
+    _spinCtrl = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 900),
+      duration: const Duration(milliseconds: 1800),
+    )..repeat();
+    _pulseCtrl = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 1200),
     )..repeat(reverse: true);
-    _opacity = Tween<double>(begin: 0.4, end: 1.0).animate(
-      CurvedAnimation(parent: _ctrl, curve: Curves.easeInOut),
+    _pulse = Tween<double>(begin: 0.7, end: 1.0).animate(
+      CurvedAnimation(parent: _pulseCtrl, curve: Curves.easeInOut),
     );
   }
 
   @override
-  void dispose() { _ctrl.dispose(); super.dispose(); }
+  void dispose() {
+    _spinCtrl.dispose();
+    _pulseCtrl.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
+    final primary = Theme.of(context).colorScheme.primary;
     return AnimatedBuilder(
-      animation: _opacity,
-      builder: (_, child) => Opacity(opacity: _opacity.value, child: child),
-      child: Container(
-        width: 72, height: 72,
-        decoration: BoxDecoration(
-          shape: BoxShape.circle,
-          border: Border.all(color: Colors.white24, width: 2),
-        ),
-        child: const Padding(
-          padding: EdgeInsets.all(14),
-          child: CircularProgressIndicator(color: Colors.white, strokeWidth: 2.5),
+      animation: Listenable.merge([_spinCtrl, _pulse]),
+      builder: (_, __) => Transform.scale(
+        scale: _pulse.value,
+        child: SizedBox(
+          width: 80, height: 80,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              // Outer ring
+              RotationTransition(
+                turns: _spinCtrl,
+                child: CustomPaint(
+                  size: const Size(80, 80),
+                  painter: _ArcPainter(primary.withValues(alpha: 0.6), 2.5),
+                ),
+              ),
+              // Inner ring (counter-rotate)
+              RotationTransition(
+                turns: Tween(begin: 1.0, end: 0.0).animate(_spinCtrl),
+                child: CustomPaint(
+                  size: const Size(56, 56),
+                  painter: _ArcPainter(primary.withValues(alpha: 0.3), 1.5),
+                ),
+              ),
+              // Center dot
+              Container(
+                width: 10, height: 10,
+                decoration: BoxDecoration(
+                  shape: BoxShape.circle,
+                  color: primary.withValues(alpha: _pulse.value),
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
   }
 }
+
+class _ArcPainter extends CustomPainter {
+  final Color color;
+  final double strokeWidth;
+  const _ArcPainter(this.color, this.strokeWidth);
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = strokeWidth
+      ..strokeCap = StrokeCap.round;
+    canvas.drawArc(
+      Rect.fromLTWH(0, 0, size.width, size.height),
+      -1.57, // -pi/2 (start from top)
+      4.2,   // ~3/4 of circle
+      false, paint,
+    );
+  }
+
+  @override
+  bool shouldRepaint(_ArcPainter oldDelegate) =>
+      oldDelegate.color != color || oldDelegate.strokeWidth != strokeWidth;
+}
+
 
 // \u2500\u2500\u2500 Next Episode Countdown (U7) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
 
@@ -1850,6 +2320,8 @@ class _PlayerSettingsSheet extends StatefulWidget {
   final Player player;
   final ExtractedStream? stream;
   final String activeQuality;
+  final bool autoQualityEnabled;
+  final VoidCallback onAutoQualitySelect;
   final ValueChanged<QualityOption> onQualitySelect;
   final ValueChanged<dynamic> onSubtitleSelect;
   final ValueChanged<AudioTrack> onAudioSelect;
@@ -1872,6 +2344,8 @@ class _PlayerSettingsSheet extends StatefulWidget {
     required this.player,
     required this.stream,
     required this.activeQuality,
+    required this.autoQualityEnabled,
+    required this.onAutoQualitySelect,
     required this.onQualitySelect,
     required this.onSubtitleSelect,
     required this.onAudioSelect,
@@ -1965,7 +2439,11 @@ class _PlayerSettingsSheetState extends State<_PlayerSettingsSheet> {
     final audioTracks = widget.player.state.tracks.audio;
     final embSubs = widget.player.state.tracks.subtitle;
     final extSubs = widget.stream?.subtitles ?? [];
-    final qualities = widget.stream?.qualities ?? [];
+    final qualities = <QualityOption>[];
+    if (widget.stream != null && widget.stream!.qualities.isNotEmpty) {
+      qualities.add(const QualityOption(quality: 'Auto', url: 'auto_placeholder'));
+      qualities.addAll(widget.stream!.qualities);
+    }
 
     final tabs = <String>[];
     if (qualities.isNotEmpty) tabs.add('Quality');
@@ -2048,13 +2526,15 @@ class _PlayerSettingsSheetState extends State<_PlayerSettingsSheet> {
       case 'Quality':
         return Column(
           children: qualities.map((q) {
-            final active = q.quality == widget.activeQuality;
+            final active = q.quality == 'Auto'
+                ? widget.autoQualityEnabled
+                : (!widget.autoQualityEnabled && q.quality == widget.activeQuality);
             return _SettingsTile(
-              icon: _qualityIcon(q.quality),
-              title: q.quality,
+              icon: q.quality == 'Auto' ? Icons.hdr_auto_rounded : _qualityIcon(q.quality),
+              title: q.quality == 'Auto' ? 'Auto (${widget.activeQuality})' : q.quality,
               active: active,
               cs: cs,
-              onTap: () => widget.onQualitySelect(q),
+              onTap: () => q.quality == 'Auto' ? widget.onAutoQualitySelect() : widget.onQualitySelect(q),
             );
           }).toList(),
         );

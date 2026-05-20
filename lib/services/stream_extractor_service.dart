@@ -50,7 +50,7 @@ class ExtractedStream {
   });
 
   bool get isHls => url.contains('.m3u8') || url.contains('mpegurl');
-  bool get isMp4 => url.contains('.mp4') || url.contains('.mkv');
+  bool get isMp4 => url.contains('.mp4') || url.contains('.mkv') || url.contains('.webm');
   bool get hasSubtitles => subtitles.isNotEmpty;
   bool get hasQualities => qualities.length > 1;
 
@@ -70,7 +70,7 @@ class StreamExtractorService {
   static const _ua = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
   /// All available provider keys for server selection UI
-  static const availableProviders = ['VidAPI', 'Videasy', 'Torrentio', 'VegaMovies', 'AutoEmbed', 'VidSrc', '2Embed', 'Stremio'];
+  static const availableProviders = ['VidAPI', 'Videasy', 'VidLink', 'Torrentio', 'VegaMovies', 'Stremio'];
 
   // Lazy-initialized external providers
   final _torrentioService = TorrentioService();
@@ -81,6 +81,11 @@ class StreamExtractorService {
   /// Persisted to SharedPreferences across app restarts.
   final _lastSuccessful = <String, String>{};
   static const _prefKey = 'extractor_last_successful';
+
+  /// ── Background Resolution Cache ──
+  /// Stores ALL resolved streams per content key so user can switch servers instantly.
+  final _resolvedStreams = <String, Map<String, ExtractedStream>>{};
+  final _resolutionStatus = <String, Map<String, ProviderStatus>>{};
 
   StreamExtractorService() {
     _loadPersistedSuccesses();
@@ -100,7 +105,6 @@ class StreamExtractorService {
 
   Future<void> _persistSuccess(String contentKey, String provider) async {
     _lastSuccessful[contentKey] = provider;
-    // Keep map bounded to 50 entries (LRU-style: drop oldest)
     if (_lastSuccessful.length > 50) {
       _lastSuccessful.remove(_lastSuccessful.keys.first);
     }
@@ -110,11 +114,36 @@ class StreamExtractorService {
     } catch (_) {}
   }
 
-  // ── Primary entry: PARALLEL RACE with status reporting ──
+  // ── Background Resolution API ──
+
+  /// Get list of servers that have successfully resolved for a content key
+  List<String> getAvailableServers(String contentKey) {
+    return _resolvedStreams[contentKey]?.keys.toList() ?? [];
+  }
+
+  /// Get a resolved stream for a specific provider (instant server switch)
+  ExtractedStream? getResolvedStream(String contentKey, String provider) {
+    return _resolvedStreams[contentKey]?[provider];
+  }
+
+  /// Get status of all providers for a content key
+  Map<String, ProviderStatus> getProviderStatuses(String contentKey) {
+    return Map.unmodifiable(_resolutionStatus[contentKey] ?? {});
+  }
+
+  /// Clear all cached resolution data for a content key (use before a forced retry).
+  void clearCache(String contentKey) {
+    _resolvedStreams.remove(contentKey);
+    _resolutionStatus.remove(contentKey);
+    debugPrint('[Extractor] Cache cleared for $contentKey');
+  }
+
+  // ── Primary entry: PARALLEL RACE with background resolution ──
 
   /// Extract stream by racing ALL providers in parallel.
-  /// First successful result wins. Calls [onStatus] for live UI feedback.
-  /// If [preferredProvider] is set, it gets a head start (fires first).
+  /// Returns first successful result immediately, but continues resolving ALL
+  /// others in background. User can then switch servers instantly via
+  /// getResolvedStream().
   Future<ExtractedStream?> extractWithStatus({
     required String imdbId,
     required String tmdbId,
@@ -130,42 +159,85 @@ class StreamExtractorService {
     final contentKey = '${imdbId}_${tmdbId}_${type}_${season}_$episode';
     final providers = _buildProviderOrder(contentKey, preferredProvider);
 
-    // Mark all as trying
+    // ── IMPORTANT: do NOT wipe the cache map — preserve background resolutions.
+    // Only create the maps if they don't already exist for this content key.
+    _resolvedStreams.putIfAbsent(contentKey, () => {});
+    final statusMap = _resolutionStatus.putIfAbsent(contentKey, () => {});
+
+    // Mark all providers as trying (only if not already resolved/failed)
     for (final p in providers) {
-      onStatus?.call(p, ProviderStatus.trying);
+      if (statusMap[p] != ProviderStatus.success) {
+        statusMap[p] = ProviderStatus.trying;
+        onStatus?.call(p, ProviderStatus.trying);
+      } else {
+        // Already cached — fire success callback so UI pill updates
+        onStatus?.call(p, ProviderStatus.success);
+      }
     }
 
-    // Fire all providers in parallel
-    final completer = Completer<ExtractedStream?>();
-    int remaining = providers.length;
-    bool resolved = false;
+    // If we already have a cached result for the preferred provider, return it immediately
+    if (preferredProvider != null) {
+      final existing = _resolvedStreams[contentKey]![preferredProvider];
+      if (existing != null) {
+        debugPrint('[Extractor] ⚡ Instant cache hit for $preferredProvider');
+        return existing;
+      }
+    }
 
-    for (final provider in providers) {
+    // Fire all providers in parallel — skip any already resolved
+    final completer = Completer<ExtractedStream?>();
+    bool firstResolved = false;
+
+    // Count only providers that aren't already done
+    final pending = providers.where((p) => statusMap[p] != ProviderStatus.success).toList();
+    int remaining = pending.length;
+
+    // If all providers are already resolved, return the best cached one immediately
+    if (remaining == 0) {
+      final cached = _resolvedStreams[contentKey]!;
+      if (cached.isNotEmpty) {
+        // Return in provider priority order
+        for (final p in providers) {
+          if (cached.containsKey(p)) return cached[p];
+        }
+      }
+      return null;
+    }
+
+    for (final provider in pending) {
       _extractSingle(
         provider: provider,
         imdbId: imdbId, tmdbId: tmdbId, type: type,
         title: title, season: season, episode: episode,
       ).then((result) {
-        if (resolved) return;
         if (result != null) {
-          resolved = true;
+          // Cache the resolved stream if cache hasn't been cleared
+          if (_resolvedStreams.containsKey(contentKey)) {
+            _resolvedStreams[contentKey]![provider] = result;
+          }
+          if (_resolutionStatus.containsKey(contentKey)) {
+            statusMap[provider] = ProviderStatus.success;
+          }
           onStatus?.call(provider, ProviderStatus.success);
-          // Mark others as idle (race over)
-          for (final p in providers) {
-            if (p != provider) onStatus?.call(p, ProviderStatus.idle);
+
+          // Complete the future with the FIRST successful result
+          if (!firstResolved) {
+            firstResolved = true;
+            _persistSuccess(contentKey, provider);
+            if (!completer.isCompleted) completer.complete(result);
           }
-          _persistSuccess(contentKey, provider);
-          if (!completer.isCompleted) completer.complete(result);
         } else {
+          statusMap[provider] = ProviderStatus.failed;
           onStatus?.call(provider, ProviderStatus.failed);
-          remaining--;
-          if (remaining <= 0 && !completer.isCompleted) {
-            completer.complete(null);
-          }
+        }
+
+        remaining--;
+        if (remaining <= 0 && !completer.isCompleted) {
+          completer.complete(null);
         }
       }).catchError((e) {
-        if (resolved) return;
         debugPrint('[Extractor] $provider threw: $e');
+        statusMap[provider] = ProviderStatus.failed;
         onStatus?.call(provider, ProviderStatus.failed);
         remaining--;
         if (remaining <= 0 && !completer.isCompleted) {
@@ -174,12 +246,12 @@ class StreamExtractorService {
       });
     }
 
-    // Global timeout — if nothing responds in 12s, give up
+    // Global timeout — if nothing responds in 15s, give up
     return completer.future.timeout(
-      const Duration(seconds: 12),
+      const Duration(seconds: 15),
       onTimeout: () {
-        resolved = true;
         debugPrint('[Extractor] Global timeout — no provider responded');
+        if (!completer.isCompleted) completer.complete(null);
         return null;
       },
     );
@@ -200,12 +272,8 @@ class StreamExtractorService {
         return extractVidAPIDirect(imdbId: imdbId, tmdbId: tmdbId, type: type, season: season, episode: episode);
       case 'Videasy':
         return extractVideasyDirect(tmdbId: tmdbId, title: title, type: type, imdbId: imdbId, season: season, episode: episode);
-      case 'AutoEmbed':
-        return extractAutoEmbedDirect(tmdbId: tmdbId, type: type, season: season, episode: episode);
-      case 'VidSrc':
-        return extractVidSrcDirect(imdbId: imdbId, tmdbId: tmdbId, type: type, season: season, episode: episode);
-      case '2Embed':
-        return extract2EmbedDirect(tmdbId: tmdbId, type: type, season: season, episode: episode);
+      case 'VidLink':
+        return extractVidLinkDirect(tmdbId: tmdbId, type: type, season: season, episode: episode);
       case 'Torrentio':
         return _torrentioService.extractStream(
           imdbId: imdbId, type: type, season: season, episode: episode,
@@ -244,7 +312,6 @@ class StreamExtractorService {
 
   List<String> _buildProviderOrder(String contentKey, String? preferred) {
     if (preferred != null && availableProviders.contains(preferred)) {
-      // User explicitly chose — put it first, others after
       return [preferred, ...availableProviders.where((p) => p != preferred)];
     }
     final last = _lastSuccessful[contentKey];
@@ -514,175 +581,106 @@ class StreamExtractorService {
     return null;
   }
 
-  // ── AutoEmbed: fast direct JSON API ──
+  // ── VidLink: new provider replacing dead VidSrc/AutoEmbed/2Embed ──
 
-  Future<ExtractedStream?> extractAutoEmbedDirect({
+  Future<ExtractedStream?> extractVidLinkDirect({
     required String tmdbId,
     required String type,
     int season = 1,
     int episode = 1,
   }) async {
+    if (tmdbId.isEmpty || tmdbId == '0') return null;
+
     try {
-      debugPrint('[Extractor] 🎯 AutoEmbed for tmdb=$tmdbId');
+      debugPrint('[Extractor] 🎯 VidLink for tmdb=$tmdbId');
+
       final path = type == 'tv'
-          ? '/embed/oplayer.php?id=$tmdbId&s=$season&e=$episode'
-          : '/embed/oplayer.php?id=$tmdbId';
-      final uri = Uri.parse('https://autoembed.cc$path');
+          ? '/tv/$tmdbId/$season/$episode'
+          : '/movie/$tmdbId';
 
-      final resp = await http.get(uri, headers: {
-        'User-Agent': _ua,
-        'Referer': 'https://autoembed.cc/',
-      }).timeout(const Duration(seconds: 5));
+      final resp = await http.get(
+        Uri.parse('https://vidlink.pro$path'),
+        headers: {
+          'User-Agent': _ua,
+          'Referer': 'https://vidlink.pro/',
+        },
+      ).timeout(const Duration(seconds: 6));
 
-      if (resp.statusCode != 200) return null;
-
-      // Parse embedded JSON from HTML response
-      final body = resp.body;
-      final srcMatch = RegExp(r'file\s*:\s*"([^"]+)"').firstMatch(body);
-      if (srcMatch == null) {
-        // Try JSON API endpoint
-        final apiPath = type == 'tv'
-            ? '/api/getVideoSource?type=tv&id=$tmdbId&season=$season&episode=$episode'
-            : '/api/getVideoSource?type=movie&id=$tmdbId';
-        final apiResp = await http.get(
-          Uri.parse('https://autoembed.cc$apiPath'),
-          headers: {'User-Agent': _ua},
-        ).timeout(const Duration(seconds: 5));
-
-        if (apiResp.statusCode == 200) {
-          final data = jsonDecode(apiResp.body);
-          final url = (data['videoSource'] ?? data['url'] ?? '').toString();
-          if (url.isNotEmpty) {
-            debugPrint('[Extractor] ✅ AutoEmbed API → $url');
-            return ExtractedStream(
-              url: url,
-              headers: {'Referer': 'https://autoembed.cc/', 'User-Agent': _ua},
-              providerName: 'AutoEmbed',
-            );
-          }
-        }
+      if (resp.statusCode != 200) {
+        debugPrint('[Extractor] VidLink returned ${resp.statusCode}');
         return null;
       }
 
-      final streamUrl = srcMatch.group(1)!;
-      debugPrint('[Extractor] ✅ AutoEmbed → $streamUrl');
-      return ExtractedStream(
-        url: streamUrl,
-        headers: {'Referer': 'https://autoembed.cc/', 'User-Agent': _ua},
-        providerName: 'AutoEmbed',
-      );
-    } catch (e) {
-      debugPrint('[Extractor] AutoEmbed failed: $e');
-    }
-    return null;
-  }
+      final body = resp.body;
 
-  // ── VidSrc: popular embed provider ──
+      // Extract stream URLs from embedded player page
+      // VidLink embeds m3u8/mp4 sources in its HTML response
+      final m3u8Matches = RegExp(r'(https?://[^\s"<>]+\.m3u8[^\s"<>]*)').allMatches(body);
+      final mp4Matches = RegExp(r'(https?://[^\s"<>]+\.mp4[^\s"<>]*)').allMatches(body);
 
-  Future<ExtractedStream?> extractVidSrcDirect({
-    required String imdbId,
-    required String tmdbId,
-    required String type,
-    int season = 1,
-    int episode = 1,
-  }) async {
-    try {
-      debugPrint('[Extractor] 🎯 VidSrc for tmdb=$tmdbId');
-      final id = imdbId.isNotEmpty && imdbId.startsWith('tt') ? imdbId : tmdbId;
-      final path = type == 'tv'
-          ? '/embed/tv/$id/$season/$episode'
-          : '/embed/movie/$id';
+      // Also try extracting from JSON data embedded in script tags
+      final jsonMatch = RegExp(r'sources\s*[:=]\s*(\[[\s\S]*?\])').firstMatch(body);
 
-      // Try multiple VidSrc domains
-      const domains = ['vidsrc.cc', 'vidsrc.xyz', 'vidsrc.in'];
-      for (final domain in domains) {
+      final qualities = <QualityOption>[];
+      final subs = <SubtitleInfo>[];
+
+      if (jsonMatch != null) {
         try {
-          final resp = await http.get(
-            Uri.parse('https://$domain$path'),
-            headers: {'User-Agent': _ua},
-          ).timeout(const Duration(seconds: 4));
-
-          if (resp.statusCode != 200) continue;
-
-          // Extract stream URL from response
-          final body = resp.body;
-          final m3u8Match = RegExp(r'(https?://[^\s"<>]+\.m3u8[^\s"<>]*)').firstMatch(body);
-          final mp4Match = RegExp(r'(https?://[^\s"<>]+\.mp4[^\s"<>]*)').firstMatch(body);
-          final streamUrl = m3u8Match?.group(1) ?? mp4Match?.group(1);
-
-          if (streamUrl != null) {
-            debugPrint('[Extractor] ✅ VidSrc/$domain → $streamUrl');
-            return ExtractedStream(
-              url: streamUrl,
-              headers: {'Referer': 'https://$domain/', 'User-Agent': _ua},
-              providerName: 'VidSrc',
-            );
-          }
-        } catch (_) {
-          continue;
-        }
-      }
-    } catch (e) {
-      debugPrint('[Extractor] VidSrc failed: $e');
-    }
-    return null;
-  }
-
-  // ── 2Embed: reliable fallback ──
-
-  Future<ExtractedStream?> extract2EmbedDirect({
-    required String tmdbId,
-    required String type,
-    int season = 1,
-    int episode = 1,
-  }) async {
-    try {
-      debugPrint('[Extractor] 🎯 2Embed for tmdb=$tmdbId');
-      final path = type == 'tv'
-          ? '/scrape?id=$tmdbId&s=$season&e=$episode'
-          : '/scrape?id=$tmdbId';
-
-      const domains = ['2embed.skin', '2embed.cc'];
-      for (final domain in domains) {
-        try {
-          final resp = await http.get(
-            Uri.parse('https://www.$domain$path'),
-            headers: {'User-Agent': _ua, 'Referer': 'https://www.$domain/'},
-          ).timeout(const Duration(seconds: 5));
-
-          if (resp.statusCode != 200) continue;
-
-          final body = resp.body;
-          // Try JSON parse first
-          try {
-            final data = jsonDecode(body);
-            final url = (data['stream'] ?? data['url'] ?? data['file'] ?? '').toString();
-            if (url.isNotEmpty && (url.contains('.m3u8') || url.contains('.mp4'))) {
-              debugPrint('[Extractor] ✅ 2Embed/$domain → $url');
-              return ExtractedStream(
-                url: url,
-                headers: {'Referer': 'https://www.$domain/', 'User-Agent': _ua},
-                providerName: '2Embed',
-              );
-            }
-          } catch (_) {
-            // Not JSON — try regex on HTML
-            final match = RegExp(r'(https?://[^\s"<>]+\.m3u8[^\s"<>]*)').firstMatch(body);
-            if (match != null) {
-              debugPrint('[Extractor] ✅ 2Embed/$domain → ${match.group(1)}');
-              return ExtractedStream(
-                url: match.group(1)!,
-                headers: {'Referer': 'https://www.$domain/', 'User-Agent': _ua},
-                providerName: '2Embed',
-              );
+          final sourcesJson = jsonDecode(jsonMatch.group(1)!);
+          if (sourcesJson is List) {
+            for (final s in sourcesJson) {
+              if (s is! Map) continue;
+              final q = s['quality']?.toString() ?? s['label']?.toString() ?? 'Auto';
+              final u = (s['file'] ?? s['url'] ?? s['src'] ?? '').toString();
+              if (u.isNotEmpty) qualities.add(QualityOption(quality: q, url: u));
             }
           }
-        } catch (_) {
-          continue;
-        }
+        } catch (_) {}
+      }
+
+      // Extract subtitles
+      final subsMatch = RegExp(r'tracks\s*[:=]\s*(\[[\s\S]*?\])').firstMatch(body);
+      if (subsMatch != null) {
+        try {
+          final subsJson = jsonDecode(subsMatch.group(1)!);
+          if (subsJson is List) {
+            for (final s in subsJson) {
+              if (s is! Map) continue;
+              final kind = (s['kind'] ?? '').toString();
+              if (kind != 'captions' && kind != 'subtitles') continue;
+              final subUrl = (s['file'] ?? s['src'] ?? '').toString();
+              final lang = (s['language'] ?? s['srclang'] ?? '').toString();
+              final label = (s['label'] ?? '').toString();
+              if (subUrl.isNotEmpty) {
+                subs.add(SubtitleInfo(url: subUrl, lang: lang, label: label));
+              }
+            }
+          }
+        } catch (_) {}
+      }
+
+      // Pick best URL
+      String? streamUrl;
+      if (qualities.isNotEmpty) {
+        streamUrl = qualities.first.url;
+      } else if (m3u8Matches.isNotEmpty) {
+        streamUrl = m3u8Matches.first.group(1);
+      } else if (mp4Matches.isNotEmpty) {
+        streamUrl = mp4Matches.first.group(1);
+      }
+
+      if (streamUrl != null && streamUrl.isNotEmpty) {
+        debugPrint('[Extractor] ✅ VidLink → $streamUrl, ${qualities.length} qualities, ${subs.length} subs');
+        return ExtractedStream(
+          url: streamUrl,
+          headers: {'Referer': 'https://vidlink.pro/', 'User-Agent': _ua},
+          providerName: 'VidLink',
+          subtitles: subs,
+          qualities: qualities,
+        );
       }
     } catch (e) {
-      debugPrint('[Extractor] 2Embed failed: $e');
+      debugPrint('[Extractor] VidLink failed: $e');
     }
     return null;
   }

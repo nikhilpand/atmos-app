@@ -123,15 +123,28 @@ class TorrentioSource {
   }
 
   /// Sort score: higher = better (prefer 1080p, high seeders, x265)
+  /// NOTE: 4K is excluded — capped at 1080p per user preference.
   int get sortScore {
     int score = seeders;
-    if (quality == '4K') score += 3000;
+    // 4K intentionally scores lower than 1080p — cap quality at 1080p
+    if (quality == '4K') score += 500;
     if (quality == '1080p') score += 2000;
     if (quality == '720p') score += 1000;
-    if (codec == 'x265') score += 500; // smaller files
+    if (codec == 'x265') score += 500; // smaller files, prefer for streaming
     if (audio == 'Atmos' || audio == 'DDP5.1') score += 200;
     return score;
   }
+
+  /// File size in bytes parsed from sizeLabel (e.g. "2.1 GB" → 2255xxxxxx)
+  double get sizeGB {
+    final m = RegExp(r'(\d+\.?\d*)\s*(GB|MB)', caseSensitive: false).firstMatch(sizeLabel);
+    if (m == null) return 0;
+    final val = double.tryParse(m.group(1)!) ?? 0;
+    return m.group(2)!.toUpperCase() == 'GB' ? val : val / 1024;
+  }
+
+  /// True if this file is within the 3 GB streaming size limit
+  bool get isWithinSizeLimit => sizeGB == 0 || sizeGB <= 3.0;
 
   @override
   String toString() => 'TorrentioSource($quality $codec $audio, seeds:$seeders, $provider)';
@@ -141,7 +154,6 @@ class TorrentioSource {
 
 class TorrentioService {
   static const _torrentioBase = 'https://torrentio.strem.fun';
-  static const _webtorBase = 'https://webtor.io';
   static const _ua = 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36';
   static const _timeout = Duration(seconds: 8);
 
@@ -226,60 +238,78 @@ class TorrentioService {
   /// Webtor.io acts as a free torrent→HTTP proxy. It downloads the torrent
   /// server-side and serves it as a standard HTTP stream — no P2P on device,
   /// no IP exposure, no VPN needed.
-  Future<String?> resolveStreamUrl(String infoHash, {int fileIdx = 0}) async {
+  Future<String?> resolveStreamUrl(
+    String infoHash, {
+    int fileIdx = 0,
+    String? filename,
+  }) async {
     if (infoHash.isEmpty) return null;
 
-    try {
-      // Webtor.io embed endpoint — returns an HTML page with the stream URL
-      // We parse the actual video source from the page
-      final magnetUrl = 'magnet:?xt=urn:btih:$infoHash'
-          '&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce'
-          '&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce'
-          '&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce';
+    // Webtor CDN mirrors — try each until one works
+    const mirrors = [
+      'https://dq4w8c.webtor.io',
+      'https://hx22fl.webtor.io',
+      'https://webtor.io',
+    ];
 
-      final encodedMagnet = Uri.encodeComponent(magnetUrl);
+    const trackers =
+        '&tr=udp%3A%2F%2Ftracker.opentrackr.org%3A1337%2Fannounce'
+        '&tr=udp%3A%2F%2Fopen.stealth.si%3A80%2Fannounce'
+        '&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce';
 
-      // Try the Webtor REST API for direct stream
-      final apiUrl = '$_webtorBase/api/magnet/$infoHash';
-      final res = await http.get(
-        Uri.parse(apiUrl),
-        headers: {'User-Agent': _ua},
-      ).timeout(const Duration(seconds: 10));
+    final magnetUrl = 'magnet:?xt=urn:btih:$infoHash$trackers';
 
-      if (res.statusCode == 200) {
-        final data = jsonDecode(res.body);
-        // Look for video file in the response
-        if (data is Map && data.containsKey('url')) {
-          return data['url'] as String;
+    for (final mirror in mirrors) {
+      try {
+        // Strategy 1: Direct stream URL with magnet
+        final encodedMagnet = Uri.encodeComponent(magnetUrl);
+        final streamUrl = '$mirror/stream?magnet=$encodedMagnet&file_index=$fileIdx';
+
+        // Validate the URL actually responds before returning
+        final headRes = await http.head(
+          Uri.parse(streamUrl),
+          headers: {'User-Agent': _ua, 'Range': 'bytes=0-0'},
+        ).timeout(const Duration(seconds: 6));
+
+        if (headRes.statusCode == 200 || headRes.statusCode == 206) {
+          debugPrint('[Webtor] ✅ Stream validated via $mirror');
+          return streamUrl;
         }
-        // Alternative: list of files
-        if (data is List && data.isNotEmpty) {
-          final videoFile = data.firstWhere(
-            (f) => _isVideoFile(f['name'] ?? ''),
-            orElse: () => data[fileIdx < data.length ? fileIdx : 0],
-          );
-          return videoFile['url'] as String?;
+
+        // Strategy 2: Try embed page and parse actual video src
+        final embedUrl = '$mirror/embed/$infoHash';
+        final embedRes = await http.get(
+          Uri.parse(embedUrl),
+          headers: {'User-Agent': _ua},
+        ).timeout(const Duration(seconds: 6));
+
+        if (embedRes.statusCode == 200) {
+          // Parse video source from the embed page
+          final srcMatch = RegExp(r'(https?://[^\s"<>]+(?:\.mp4|\.mkv|\.avi|/stream)[^\s"<>]*)').firstMatch(embedRes.body);
+          if (srcMatch != null) {
+            debugPrint('[Webtor] ✅ Stream extracted from embed page via $mirror');
+            return srcMatch.group(1);
+          }
         }
+      } catch (e) {
+        debugPrint('[Webtor] Mirror $mirror failed: $e');
       }
-
-      // Fallback: construct the Webtor embed stream URL directly
-      // This is the pattern Webtor uses for magnet streaming
-      final streamUrl =
-          '$_webtorBase/stream?magnet=$encodedMagnet&file_index=$fileIdx';
-      return streamUrl;
-    } catch (e) {
-      debugPrint('[Webtor] Stream resolve error: $e');
-      return null;
     }
+
+    // Final fallback: construct URL with first mirror (may need seeding time)
+    final fallbackUrl = '${mirrors[0]}/stream?magnet=${Uri.encodeComponent(magnetUrl)}&file_index=$fileIdx';
+    debugPrint('[Webtor] ⚠️ Using unvalidated fallback URL');
+    return fallbackUrl;
   }
 
   /// Full extraction: Torrentio → best source → Webtor.io → ExtractedStream
+  /// Caps quality at 1080p and file size at 3 GB.
   Future<ExtractedStream?> extractStream({
     required String imdbId,
     required String type,
     int season = 1,
     int episode = 1,
-    String? qualityFilter, // '1080p', '4K', '720p' — null = best available
+    String? qualityFilter,
   }) async {
     // 1. Get sources from Torrentio
     final sources = await fetchSources(
@@ -290,32 +320,50 @@ class TorrentioService {
     );
     if (sources.isEmpty) return null;
 
-    // 2. Filter by quality if specified
-    List<TorrentioSource> candidates = sources;
-    if (qualityFilter != null) {
-      candidates = sources.where((s) {
-        final q = qualityFilter.toLowerCase();
-        return s.quality.toLowerCase().contains(q);
-      }).toList();
-      if (candidates.isEmpty) candidates = sources; // fallback to all
+    // 2. Hard cap: exclude 4K and files >3 GB (streaming platform, not downloader)
+    var candidates = sources
+        .where((s) => s.quality != '4K' && s.isWithinSizeLimit)
+        .toList();
+
+    // 3. If no candidates within limits, relax size (but keep quality cap)
+    if (candidates.isEmpty) {
+      candidates = sources.where((s) => s.quality != '4K').toList();
+    }
+    if (candidates.isEmpty) candidates = sources;
+
+    // 4. Apply optional quality filter
+    if (qualityFilter != null && qualityFilter != '4K') {
+      final filtered = candidates.where((s) =>
+          s.quality.toLowerCase().contains(qualityFilter.toLowerCase())).toList();
+      if (filtered.isNotEmpty) candidates = filtered;
     }
 
-    // 3. Try top 3 sources (in case first Webtor resolve fails)
-    for (final source in candidates.take(3)) {
+    // 5. Re-sort by score (4K already penalised, size-limited already filtered)
+    candidates.sort((a, b) => b.sortScore.compareTo(a.sortScore));
+
+    debugPrint('[Torrentio] ${candidates.length} candidates (≤1080p ≤3GB) for $imdbId');
+
+    // 6. Try top 5 sources (webtor can be flaky)
+    for (final source in candidates.take(5)) {
+      final filename = (source.title.split('\n')
+          .skip(1)
+          .firstWhere((l) => l.trim().isNotEmpty && !l.contains('👤') && !l.contains('💾'), orElse: () => ''));
+
       final streamUrl = await resolveStreamUrl(
         source.infoHash!,
         fileIdx: source.fileIdx ?? 0,
+        filename: filename.trim().isNotEmpty ? filename.trim() : null,
       );
 
       if (streamUrl != null && streamUrl.isNotEmpty) {
-        debugPrint('[Torrentio] Resolved: ${source.quality} ${source.codec} → $streamUrl');
+        debugPrint('[Torrentio] ✅ Resolved: ${source.quality} ${source.codec} ${source.sizeGB.toStringAsFixed(1)}GB → $streamUrl');
         return ExtractedStream(
           url: streamUrl,
           headers: {'User-Agent': _ua},
-          providerName: 'Torrentio (${source.provider})',
+          providerName: 'Torrentio/${source.provider} (${source.quality})',
           subtitles: const [],
           qualities: [
-            QualityOption(quality: source.quality, url: streamUrl),
+            QualityOption(quality: '${source.quality} ${source.sizeLabel}', url: streamUrl),
           ],
         );
       }
@@ -325,11 +373,4 @@ class TorrentioService {
     return null;
   }
 
-  bool _isVideoFile(String name) {
-    final lower = name.toLowerCase();
-    return lower.endsWith('.mp4') ||
-        lower.endsWith('.mkv') ||
-        lower.endsWith('.avi') ||
-        lower.endsWith('.webm');
-  }
 }

@@ -1,7 +1,12 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:atmos/services/stream_extractor_service.dart';
 
 void main() {
+  setUpAll(() {
+    dotenv.testLoad(fileInput: 'EXTRACTOR_WORKER_URL=http://localhost:8787');
+  });
+
   group('ExtractedStream', () {
     test('isHls detects m3u8 URLs', () {
       const stream = ExtractedStream(
@@ -76,18 +81,18 @@ void main() {
       service = StreamExtractorService();
     });
 
-    test('availableProviders has 5 providers', () {
-      expect(StreamExtractorService.availableProviders.length, equals(5));
-      expect(StreamExtractorService.availableProviders,
-          contains('VidAPI'));
-      expect(StreamExtractorService.availableProviders,
-          contains('AutoEmbed'));
-      expect(StreamExtractorService.availableProviders,
-          contains('Videasy'));
-      expect(StreamExtractorService.availableProviders,
-          contains('VidSrc'));
-      expect(StreamExtractorService.availableProviders,
-          contains('2Embed'));
+    test('availableProviders has 6 providers (dead providers removed, VidLink added)', () {
+      expect(StreamExtractorService.availableProviders.length, equals(6));
+      expect(StreamExtractorService.availableProviders, contains('VidAPI'));
+      expect(StreamExtractorService.availableProviders, contains('Videasy'));
+      expect(StreamExtractorService.availableProviders, contains('VidLink'));
+      expect(StreamExtractorService.availableProviders, contains('Torrentio'));
+      expect(StreamExtractorService.availableProviders, contains('VegaMovies'));
+      expect(StreamExtractorService.availableProviders, contains('Stremio'));
+      // Dead providers removed:
+      expect(StreamExtractorService.availableProviders, isNot(contains('AutoEmbed')));
+      expect(StreamExtractorService.availableProviders, isNot(contains('VidSrc')));
+      expect(StreamExtractorService.availableProviders, isNot(contains('2Embed')));
     });
 
     test('extractWithStatus returns null for empty IDs', () async {
@@ -123,8 +128,9 @@ void main() {
         },
       );
 
-      // All providers should have been attempted
-      expect(statuses.length, equals(5));
+      // All providers should have been attempted (now 6: VidAPI, Videasy, VidLink, Torrentio, VegaMovies, Stremio)
+      expect(statuses.length, equals(StreamExtractorService.availableProviders.length));
+
       for (final entry in statuses.entries) {
         expect(entry.value, equals(ProviderStatus.trying),
             reason: '${entry.key} should have fired trying');

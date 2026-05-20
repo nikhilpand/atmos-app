@@ -4,6 +4,7 @@
 // and respects the global timeout.
 import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:atmos/services/stream_extractor_service.dart';
 
 // ── Fake provider harness ──────────────────────────────────────────────────────
@@ -51,6 +52,10 @@ Future<String?> _simulateRace({
 }
 
 void main() {
+  setUpAll(() {
+    dotenv.testLoad(fileInput: 'EXTRACTOR_WORKER_URL=http://localhost:8787');
+  });
+
   group('Parallel Provider Race — unit simulation', () {
     test('fastest provider wins when multiple succeed', () async {
       final winner = await _simulateRace(
@@ -139,8 +144,8 @@ void main() {
   });
 
   group('StreamExtractorService — provider list evolution', () {
-    test('all 5 providers are in the available list', () {
-      const expected = {'VidAPI', 'AutoEmbed', 'Videasy', 'VidSrc', '2Embed'};
+    test('all 6 providers are in the available list (dead providers removed)', () {
+      const expected = {'VidAPI', 'Videasy', 'VidLink', 'Torrentio', 'VegaMovies', 'Stremio'};
       final actual = StreamExtractorService.availableProviders.toSet();
       expect(actual, equals(expected));
     });
@@ -164,8 +169,8 @@ void main() {
         },
       );
 
-      // All 5 providers should have been tried
-      expect(statuses.keys.length, equals(5));
+      // All 6 providers should have been tried
+      expect(statuses.keys.length, equals(StreamExtractorService.availableProviders.length));
     });
 
     test('extractWithStatus handles TV episode correctly', () async {

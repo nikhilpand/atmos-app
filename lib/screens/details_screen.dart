@@ -493,6 +493,8 @@ class _PlayButtonState extends ConsumerState<_PlayButton> {
                 ? int.tryParse(widget.details.releaseDate!.split('-').first)
                 : null,
             mediaType: widget.details.mediaType == MediaType.movie ? 'movie' : 'tv',
+            // Pass language preference so ranking boosts user's chosen language
+            preferLang: filters.hasLanguageFilter ? filters.language.token : null,
           ).then((results) => telegram.toQualityOptions(results)),
         );
       }
@@ -964,8 +966,13 @@ class _EpisodesSection extends ConsumerWidget {
                     final hint = filters.searchHint;
                     final queryTitle = hint.isNotEmpty ? '${details.title} $hint' : details.title;
                     futures.add(
-                      telegram.searchVideos(queryTitle, mediaType: 'tv', season: selectedSeason, episode: ep.episodeNumber)
-                          .then((r) => telegram.toQualityOptions(r)),
+                      telegram.searchVideos(
+                        queryTitle,
+                        mediaType: 'tv',
+                        season: selectedSeason,
+                        episode: ep.episodeNumber,
+                        preferLang: filters.hasLanguageFilter ? filters.language.token : null,
+                      ).then((r) => telegram.toQualityOptions(r)),
                     );
 
                     if (futures.isEmpty) {

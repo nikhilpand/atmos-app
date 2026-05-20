@@ -20,6 +20,41 @@ import {
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36';
 
+// ─── Parallel race resolution utilities ───────────────────────────────────────
+const timeoutPromise = (promise, ms, name) => {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(`${name} timed out`)), ms))
+  ]);
+};
+
+async function raceResolvers(imdbId, tmdbId, type, season, episode) {
+  const promises = RESOLVERS.map(async (resolver) => {
+    try {
+      console.log(`[Extract] Starting ${resolver.name}...`);
+      const result = await timeoutPromise(
+        resolver.resolve(imdbId, tmdbId, type, season, episode),
+        4000,
+        resolver.name
+      );
+      if (result && result.url) {
+        return { resolver, result };
+      }
+      throw new Error(`${resolver.name} returned empty result`);
+    } catch (e) {
+      console.log(`[Extract] ${resolver.name} failed: ${e.message}`);
+      throw e;
+    }
+  });
+
+  try {
+    return await Promise.any(promises);
+  } catch (err) {
+    // All promises rejected
+    return null;
+  }
+}
+
 // ─── VegaMovies domain rotation list ─────────────────────────────────────────
 // These are tried in order until one succeeds.
 const VEGA_DOMAINS = [
@@ -32,6 +67,48 @@ const VEGA_DOMAINS = [
 // ─── Per-Provider API Resolvers ───────────────────────────────────────────────
 
 const RESOLVERS = [
+  {
+    name: 'vidapi',
+    async resolve(imdb, tmdb, type, season, episode) {
+      const params = new URLSearchParams();
+      if (imdb && imdb.startsWith('tt')) {
+        params.append('imdb', imdb);
+      } else if (tmdb) {
+        params.append('tmdb', tmdb);
+      } else {
+        return null;
+      }
+      params.append('type', type === 'tv' ? 'tv' : 'movie');
+      if (type === 'tv') {
+        params.append('season', String(season));
+        params.append('episode', String(episode));
+      }
+
+      const res = await fetch(`https://streamdata.vaplayer.ru/api.php?${params.toString()}`, {
+        headers: {
+          'User-Agent': UA,
+          'Referer': 'https://brightpathsignals.com/',
+          'Origin': 'https://brightpathsignals.com',
+        },
+      });
+      if (!res.ok) return null;
+      const data = await res.json();
+      
+      const file = data?.file || data?.url || data?.stream_url || data?.data?.file || data?.data?.url || data?.data?.stream_url;
+      if (file && typeof file === 'string' && file.length > 0) {
+        return { url: file, referer: 'https://brightpathsignals.com/' };
+      }
+      
+      if (data?.data?.stream_urls && Array.isArray(data.data.stream_urls) && data.data.stream_urls.length > 0) {
+        const url = data.data.stream_urls[0];
+        if (url && (url.includes('.m3u8') || url.includes('.mp4'))) {
+          return { url, referer: 'https://brightpathsignals.com/' };
+        }
+      }
+      
+      return null;
+    }
+  },
   {
     name: 'videasy',
     async resolve(imdb, tmdb, type, season, episode) {
@@ -396,26 +473,20 @@ export default {
         });
       }
 
-      for (const resolver of RESOLVERS) {
-        try {
-          console.log(`[Extract] Trying ${resolver.name}...`);
-          const result = await resolver.resolve(imdbId, tmdbId, type, season, episode);
-          if (result?.url) {
-            const proxyUrl = `${url.origin}/proxy?url=${encodeURIComponent(result.url)}&referer=${encodeURIComponent(result.referer || '')}`;
-            console.log(`[Extract] ✅ ${resolver.name} → ${result.url}`);
-            return new Response(JSON.stringify({
-              success: true,
-              provider: resolver.name,
-              url: result.url,
-              proxyUrl,
-              headers: { Referer: result.referer || '' },
-              type: result.url.includes('.m3u8') ? 'hls' : 'mp4',
-              imdbId, tmdbId,
-            }), { headers: corsHeaders });
-          }
-        } catch (err) {
-          console.error(`[Extract] ${resolver.name} error:`, err.message);
-        }
+      const raceResult = await raceResolvers(imdbId, tmdbId, type, season, episode);
+      if (raceResult) {
+        const { resolver, result } = raceResult;
+        const proxyUrl = `${url.origin}/proxy?url=${encodeURIComponent(result.url)}&referer=${encodeURIComponent(result.referer || '')}`;
+        console.log(`[Extract] ✅ ${resolver.name} won the race → ${result.url}`);
+        return new Response(JSON.stringify({
+          success: true,
+          provider: resolver.name,
+          url: result.url,
+          proxyUrl,
+          headers: { Referer: result.referer || '' },
+          type: result.url.includes('.m3u8') ? 'hls' : 'mp4',
+          imdbId, tmdbId,
+        }), { headers: corsHeaders });
       }
 
       return new Response(JSON.stringify({ success: false, error: 'All providers exhausted' }), {

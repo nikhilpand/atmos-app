@@ -1,13 +1,14 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:isolate';
-import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:handy_tdlib/handy_tdlib.dart' as td;
 import '../models/telegram_search_result.dart';
 import '../models/download_model.dart';
 import 'atmos_index_client.dart';
+import 'alias_database.dart';
 
 // ════════════════════════════════════════════════════════════════════════════════
 // TDLib Auth States
@@ -57,7 +58,7 @@ class TelegramDownloadProgress {
 //
 // TDLib runs on a background isolate to keep UI smooth.
 
-class TelegramService extends ChangeNotifier {
+class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
   // AtmosIndex catalog client (works without TDLib login)
   final AtmosIndexClient _indexClient = AtmosIndexClient();
   AtmosIndexClient get indexClient => _indexClient;
@@ -83,6 +84,10 @@ class TelegramService extends ChangeNotifier {
   // Search result cache (title → results, expires after 1 hour)
   final _searchCache = <String, _CachedSearch>{};
 
+  // Inline bot search tracking
+  final _pendingInlineQueries = <int, Completer<List<TelegramSearchResult>>>{};
+  static final _botIdCache = <String, int>{};
+
   // Wait for initial auth state resolution
   final Completer<void> _readyCompleter = Completer<void>();
   Future<void> get whenReady => _readyCompleter.future;
@@ -106,8 +111,10 @@ class TelegramService extends ChangeNotifier {
     if (_isInitialized) return;
 
     try {
-      final dir = await getApplicationDocumentsDirectory();
+      final dir = await getApplicationSupportDirectory();
       _tdLibPath = '${dir.path}/tdlib';
+
+      WidgetsBinding.instance.addObserver(this);
 
       td.TdPlugin.initialize();
       _clientId = td.TdPlugin.instance.tdCreateClientId();
@@ -131,7 +138,7 @@ class TelegramService extends ChangeNotifier {
       await _startReceiver();
 
       _isInitialized = true;
-      debugPrint('[Telegram] TDLib initialized, clientId: $_clientId');
+      debugPrint('[Telegram] TDLib initialized in support directory: $_tdLibPath, clientId: $_clientId');
     } catch (e) {
       debugPrint('[Telegram] Init error: $e');
       _errorMessage = e.toString();
@@ -142,12 +149,27 @@ class TelegramService extends ChangeNotifier {
 
   @override
   void dispose() {
-    _receiveIsolate?.kill(priority: Isolate.immediate);
-    _mainReceivePort?.close();
+    WidgetsBinding.instance.removeObserver(this);
     if (_clientId != null) {
       _send(const td.Close());
     }
+    // Give it a tiny bit of time to send the close command before killing the isolate
+    Future.delayed(const Duration(milliseconds: 300), () {
+      _receiveIsolate?.kill(priority: Isolate.immediate);
+      _mainReceivePort?.close();
+    });
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    debugPrint('[Telegram] AppLifecycleState changed to: $state');
+    if (state == AppLifecycleState.detached) {
+      debugPrint('[Telegram] App detached, initiating clean TDLib database close...');
+      if (_clientId != null) {
+        _send(const td.Close());
+      }
+    }
   }
 
   // ── Authentication ────────────────────────────────────────────────────────
@@ -190,17 +212,19 @@ class TelegramService extends ChangeNotifier {
 
   /// Search for videos — works WITHOUT Telegram login via AtmosIndex catalog.
   /// If the user IS logged in, also runs TDLib search in parallel and merges.
+  /// [preferLang]: optional language to boost in result ranking (e.g. 'Hindi', 'Dual Audio').
   Future<List<TelegramSearchResult>> searchVideos(
     String title, {
     int? year,
     String? mediaType,
     int? season,
     int? episode,
+    String? preferLang,  // ← bound to filter picker
   }) async {
     final base = title.trim();
     if (base.isEmpty) return [];
 
-    final cacheKey = '${base.toLowerCase()}_${season ?? ''}_${episode ?? ''}';
+    final cacheKey = '${base.toLowerCase()}_${season ?? ''}_${episode ?? ''}_${preferLang ?? ''}';
     final cached = _searchCache[cacheKey];
     if (cached != null && cached.isValid) {
       debugPrint('[Telegram] Cache hit: ${cached.results.length} results for "$base"');
@@ -217,10 +241,16 @@ class TelegramService extends ChangeNotifier {
         ? _searchViaTdlib(base, year: year, mediaType: mediaType, season: season, episode: episode)
         : Future.value(<TelegramSearchResult>[]);
 
-    // Run both in parallel
-    final results = await Future.wait([catalogFuture, tdlibFuture]);
+    // ── Stage 3: Inline Bots search (only if logged in) ───────────────────
+    final inlineBotsFuture = isLoggedIn
+        ? _searchViaInlineBots(base, season: season, episode: episode)
+        : Future.value(<TelegramSearchResult>[]);
+
+    // Run all in parallel
+    final results = await Future.wait([catalogFuture, tdlibFuture, inlineBotsFuture]);
     final catalogResults = results[0] as List<IndexedMedia>;
     final tdlibResults = results[1] as List<TelegramSearchResult>;
+    final inlineResults = results[2] as List<TelegramSearchResult>;
 
     // Convert catalog results to TelegramSearchResult format
     final catalogConverted = catalogResults.map((r) => TelegramSearchResult(
@@ -237,11 +267,15 @@ class TelegramService extends ChangeNotifier {
       uploadDate: DateTime.now(),
     )).toList();
 
-    // Merge: TDLib results first (have file_id), then catalog results
+    // Merge: TDLib results first (have file_id), then inline bot results, then catalog results
     final seen = <String>{};
     final merged = <TelegramSearchResult>[];
 
     for (final r in tdlibResults) {
+      final key = '${r.fileId}';
+      if (seen.add(key)) merged.add(r);
+    }
+    for (final r in inlineResults) {
       final key = '${r.fileId}';
       if (seen.add(key)) merged.add(r);
     }
@@ -251,10 +285,10 @@ class TelegramService extends ChangeNotifier {
       if (seen.add(key)) merged.add(r);
     }
 
-    merged.sort((a, b) => _qualityOrder(a.quality).compareTo(_qualityOrder(b.quality)));
+    merged.sort((a, b) => _scoreResult(b, preferLang: preferLang).compareTo(_scoreResult(a, preferLang: preferLang))); // descending
 
     _searchCache[cacheKey] = _CachedSearch(merged);
-    debugPrint('[Telegram] Hybrid search: ${catalogConverted.length} catalog + ${tdlibResults.length} TDLib = ${merged.length} merged for "$base"');
+    debugPrint('[Telegram] Hybrid search: ${catalogConverted.length} catalog + ${tdlibResults.length} TDLib + ${inlineResults.length} InlineBots = ${merged.length} merged for "$base"');
     return merged;
   }
 
@@ -266,32 +300,27 @@ class TelegramService extends ChangeNotifier {
     int? season,
     int? episode,
   }) async {
-    final base = title.trim();
-    final withYear = year != null ? '$base $year' : null;
-    final with1080 = '$base 1080p';
-    final with720 = '$base 720p';
-    final with1080Year = year != null ? '$base $year 1080p' : null;
-    final ep = (mediaType == 'tv' && season != null && episode != null)
-        ? '$base S${season.toString().padLeft(2, "0")}E${episode.toString().padLeft(2, "0")}'
-        : null;
-    final epAlt = (mediaType == 'tv' && season != null && episode != null)
-        ? '$base Season $season Episode $episode'
-        : null;
+    final titleVariations = await AliasDatabase.getSearchVariations(title);
+    final queries = <String>{};
 
-    final queries = <String>{
-      base,
-      if (withYear != null) withYear,
-      with1080,
-      with720,
-      if (with1080Year != null) with1080Year,
-      if (ep != null) ep,
-      if (epAlt != null) epAlt,
-    }.toList();
+    for (final variant in titleVariations) {
+      queries.add(variant);
+      if (year != null) queries.add('$variant $year');
+      queries.add('$variant 1080p');
+      queries.add('$variant 720p');
+      if (year != null) queries.add('$variant $year 1080p');
 
-    debugPrint('[Telegram] TDLib searching ${queries.length} variants for "$base"');
+      if (mediaType == 'tv' && season != null && episode != null) {
+        queries.add('$variant S${season.toString().padLeft(2, "0")}E${episode.toString().padLeft(2, "0")}');
+        queries.add('$variant S${season.toString().padLeft(2, "0")}');
+        queries.add('$variant Season $season Episode $episode');
+      }
+    }
+
+    debugPrint('[Telegram] TDLib searching ${queries.length} variants for "$title" (Variations: $titleVariations)');
 
     try {
-      final futures = queries.map((q) => _searchOnce(q, season, episode)).toList();
+      final futures = queries.map((q) => _searchOnce(q, season, episode, titleVariations)).toList();
       final allLists = await Future.wait(futures);
 
       final seen = <int>{};
@@ -354,12 +383,12 @@ class TelegramService extends ChangeNotifier {
 
   /// Single TDLib SearchMessages call — tries both Document and Video filters
   /// then merges deduped results.
-  Future<List<TelegramSearchResult>> _searchOnce(String query, int? season, int? episode) async {
+  Future<List<TelegramSearchResult>> _searchOnce(String query, int? season, int? episode, List<String> variations) async {
     Future<List<TelegramSearchResult>> fire(td.SearchMessagesFilter filter) {
       final c = Completer<List<TelegramSearchResult>>();
       // Use atomic counter so concurrent calls never share an extra ID
       final id = _nextExtra();
-      _pendingSearches[id] = _PendingSearch(c, season, episode);
+      _pendingSearches[id] = _PendingSearch(c, season, episode, variations);
       _send(td.SearchMessages(
         chatList: null,
         onlyInChannels: true,
@@ -506,7 +535,7 @@ class TelegramService extends ChangeNotifier {
   void _handleTdUpdate(dynamic obj, {int? extra}) {
     if (obj == null) return;
 
-    // ── Errors with pending search cleanup ───────────────────────────────
+    // ── Errors with pending search/resolution cleanup ──────────────────
     if (obj is td.TdError) {
       const ignorableCodes = {401, 404, 406, 420};
       if (ignorableCodes.contains(obj.code)) {
@@ -514,10 +543,32 @@ class TelegramService extends ChangeNotifier {
         if (extra != null) {
           final p = _pendingSearches.remove(extra);
           if (p != null && !p.completer.isCompleted) p.completer.complete([]);
+
+          final c = _pendingChatResolves.remove(extra);
+          if (c != null && !c.isCompleted) c.complete(null);
+
+          final r = _pendingResolves.remove(extra);
+          if (r != null && !r.isCompleted) r.complete(null);
+
+          final i = _pendingInlineQueries.remove(extra);
+          if (i != null && !i.isCompleted) i.complete([]);
         }
         return;
       }
       debugPrint('[Telegram] Error ${obj.code}: ${obj.message}');
+      if (extra != null) {
+        final p = _pendingSearches.remove(extra);
+        if (p != null && !p.completer.isCompleted) p.completer.complete([]);
+
+        final c = _pendingChatResolves.remove(extra);
+        if (c != null && !c.isCompleted) c.complete(null);
+
+        final r = _pendingResolves.remove(extra);
+        if (r != null && !r.isCompleted) r.complete(null);
+
+        final i = _pendingInlineQueries.remove(extra);
+        if (i != null && !i.isCompleted) i.complete([]);
+      }
       _errorMessage = obj.message;
       _authState = TelegramAuthState.error;
       notifyListeners();
@@ -542,7 +593,39 @@ class TelegramService extends ChangeNotifier {
       return;
     }
 
+    // ── Chat resolution (Chat) ──────────────────────────────────────────
+    if (obj is td.Chat) {
+      if (extra != null && _pendingChatResolves.containsKey(extra)) {
+        final c = _pendingChatResolves.remove(extra);
+        c?.complete(obj.id);
+      }
+      return;
+    }
+
+    // ── Message resolution (Message) ────────────────────────────────────
+    if (obj is td.Message) {
+      if (extra != null && _pendingResolves.containsKey(extra)) {
+        final c = _pendingResolves.remove(extra);
+        final content = obj.content;
+        int? fileId;
+        if (content is td.MessageVideo) {
+          fileId = content.video.video.id;
+        } else if (content is td.MessageDocument) {
+          fileId = content.document.document.id;
+        }
+        c?.complete(fileId);
+      }
+      return;
+    }
+
+    // ── Inline Query results (InlineQueryResults) ──────────────────────
+    if (obj is td.InlineQueryResults) {
+      _handleInlineQueryResults(obj, extraId: extra);
+      return;
+    }
+
     // Everything else silently ignored.
+    return;
   }
 
   void _handleAuthState(td.AuthorizationState state) {
@@ -672,6 +755,13 @@ class TelegramService extends ChangeNotifier {
         }
       }
 
+      // Title matching verification using variations
+      if (pendingSearch != null && pendingSearch.variations.isNotEmpty) {
+        if (!_matchesTitle(fileName, caption, pendingSearch.variations)) {
+          continue;
+        }
+      }
+
       final quality = _parseQuality(fileName, caption);
       final qLower  = quality.toLowerCase();
       if (qLower.contains('4k') || qLower.contains('2160') ||
@@ -701,7 +791,7 @@ class TelegramService extends ChangeNotifier {
       ));
     }
 
-    results.sort((a, b) => _qualityOrder(a.quality).compareTo(_qualityOrder(b.quality)));
+    results.sort((a, b) => _scoreResult(b).compareTo(_scoreResult(a)));
 
     // Route to the correct completer by @extra ID, fall back to FIFO.
     if (extraId != null && _pendingSearches.containsKey(extraId)) {
@@ -712,6 +802,188 @@ class TelegramService extends ChangeNotifier {
       if (!entry.value.completer.isCompleted) entry.value.completer.complete(results);
       _pendingSearches.remove(entry.key);
     }
+  }
+
+  void _handleInlineQueryResults(td.InlineQueryResults results, {int? extraId}) {
+    if (extraId == null || !_pendingInlineQueries.containsKey(extraId)) return;
+    final c = _pendingInlineQueries.remove(extraId);
+
+    final list = <TelegramSearchResult>[];
+    const minBytes = 50 * 1024 * 1024; // 50 MB
+
+    for (final r in results.results) {
+      td.Video? video;
+      td.Document? doc;
+      String? title;
+      String? desc;
+
+      if (r is td.InlineQueryResultDocument) {
+        doc = r.document;
+        title = r.title;
+        desc = r.description;
+      } else if (r is td.InlineQueryResultVideo) {
+        video = r.video;
+        title = r.title;
+        desc = r.description;
+      } else if (r is td.InlineQueryResultArticle) {
+        title = r.title;
+        desc = r.description;
+      }
+
+      final fileId = video?.video.id ?? doc?.document.id ?? 0;
+      final fileSize = video?.video.expectedSize ?? doc?.document.expectedSize ?? 0;
+      final fileName = video?.fileName ?? doc?.fileName ?? title ?? desc ?? '';
+      final caption = desc ?? '';
+
+      if (fileId == 0) continue;
+      if (fileSize < minBytes) continue;
+
+      final quality = _parseQuality(fileName, caption);
+      final codec = _parseVideoCodec(fileName, caption);
+      final audio = _parseAudio(fileName, caption);
+      final partInfo = _detectMultiPart(fileName, caption);
+
+      list.add(TelegramSearchResult(
+        fileId: fileId,
+        fileSize: fileSize,
+        fileName: fileName,
+        caption: caption,
+        channelTitle: 'Telegram Bot',
+        channelId: 0,
+        messageId: 0,
+        quality: quality,
+        videoCodec: codec,
+        audioInfo: audio,
+        uploadDate: DateTime.now(),
+        isMultiPart: partInfo.$1,
+        partNumber: partInfo.$2,
+        totalParts: partInfo.$3,
+      ));
+    }
+
+    list.sort((a, b) => _scoreResult(b).compareTo(_scoreResult(a)));
+    c?.complete(list);
+  }
+
+  Future<List<TelegramSearchResult>> _searchViaInlineBots(
+    String query, {
+    int? season,
+    int? episode,
+  }) async {
+    const botUsernames = [
+      'SearchMoviesBot',
+      'TVSeriesSearchBot',
+      'TGMovies3Bot',
+      'SK_Movies1_bot',
+      'Series_Movies_Search_Bot',
+      'FilesSearchBot',
+      'YourFindBot',
+      'Movies_Series_Find_RoBot',
+      'Anime4kaSearchBot',
+      'AiMovieMY_Bot',
+      'mr_robot_movies_bot',
+      'iPopcornBot',
+      'Olamovie_search_bot',
+      'LinkzMoviesBot',
+      'HDMoviesXBot',
+      'FilmifyBot',
+      'PostFinderBot',
+    ];
+
+    final results = <TelegramSearchResult>[];
+    final titleVariations = await AliasDatabase.getSearchVariations(query);
+
+    // Build query variants to maximize find rate:
+    // Use at most the top 2 variations of the title to avoid bot rate limits
+    final activeTitleVariations = titleVariations.take(2).toList();
+    final queries = <String>[];
+    for (final variant in activeTitleVariations) {
+      if (season != null && episode != null) {
+        queries.add('$variant S${season.toString().padLeft(2, '0')}E${episode.toString().padLeft(2, '0')}');
+        queries.add('$variant S${season.toString().padLeft(2, '0')}');
+      } else if (season != null) {
+        queries.add('$variant S${season.toString().padLeft(2, '0')}');
+      } else {
+        queries.add(variant);
+      }
+    }
+
+    final futures = botUsernames.map((username) async {
+      try {
+        int? botUserId = _botIdCache[username];
+        if (botUserId == null) {
+          botUserId = await _resolveChatId(username);
+          if (botUserId != null) {
+            _botIdCache[username] = botUserId;
+          }
+        }
+
+        if (botUserId == null) return;
+
+        // Query all variants in parallel for this bot
+        final botResults = await Future.wait<List<TelegramSearchResult>>(
+          queries.map((q) async {
+            final res = await _getInlineQueryResults(
+              botUserId: botUserId!,
+              query: q,
+            );
+            return res ?? <TelegramSearchResult>[];
+          }),
+        );
+
+        for (final inlineResults in botResults) {
+          Iterable<TelegramSearchResult> filtered = inlineResults;
+          if (season != null && episode != null) {
+            filtered = inlineResults.where((r) =>
+                _matchesEpisode(r.fileName, r.caption, season, episode));
+          }
+          // Filter by title variations to prevent false positives
+          filtered = filtered.where((r) =>
+              _matchesTitle(r.fileName, r.caption, titleVariations));
+          results.addAll(filtered);
+        }
+      } catch (e) {
+        debugPrint('[Telegram] Inline bot @$username search failed: $e');
+      }
+    });
+
+    await Future.wait(futures);
+
+    // Deduplicate results by fileName and fileSize
+    final uniqueResults = <TelegramSearchResult>[];
+    final seen = <String>{};
+    for (final r in results) {
+      final key = '${r.fileName}_${r.fileSize}';
+      if (seen.add(key)) {
+        uniqueResults.add(r);
+      }
+    }
+    return uniqueResults;
+  }
+
+  Future<List<TelegramSearchResult>?> _getInlineQueryResults({
+    required int botUserId,
+    required String query,
+  }) async {
+    final c = Completer<List<TelegramSearchResult>>();
+    final id = _nextExtra();
+    _pendingInlineQueries[id] = c;
+
+    _send(
+      td.GetInlineQueryResults(
+        botUserId: botUserId,
+        chatId: botUserId,
+        userLocation: null,
+        query: query,
+        offset: '',
+      ),
+      extra: id,
+    );
+
+    return c.future.timeout(const Duration(seconds: 12), onTimeout: () {
+      _pendingInlineQueries.remove(id);
+      return [];
+    });
   }
 
   // ── Parsers ───────────────────────────────────────────────────────────────
@@ -735,6 +1007,29 @@ class TelegramService extends ChangeNotifier {
     final genericRegex = RegExp('\\b0*$season[._-]0*$episode\\b', caseSensitive: false);
     if (genericRegex.hasMatch(text)) return true;
     
+    return false;
+  }
+
+  bool _matchesTitle(String fileName, String caption, List<String> variations) {
+    final text = '$fileName $caption'.toLowerCase();
+    // Strip telegram bot/channel names and punctuation
+    final cleanText = text.replaceAll(RegExp(r'@\w+'), '').replaceAll(RegExp(r'[^\w\s]'), ' ');
+    final words = cleanText.split(RegExp(r'\s+')).where((w) => w.isNotEmpty).toSet();
+
+    for (final variant in variations) {
+      final cleanVariant = variant.toLowerCase().replaceAll(RegExp(r'[^\w\s]'), '');
+      if (cleanVariant.isEmpty) continue;
+
+      if (cleanVariant.length <= 4) {
+        // Short abbreviations (e.g. bb, got) must be distinct words to prevent false positives
+        if (words.contains(cleanVariant)) return true;
+      } else {
+        // Substring matches are safe for longer names
+        if (cleanText.contains(cleanVariant) || cleanText.replaceAll(' ', '').contains(cleanVariant)) {
+          return true;
+        }
+      }
+    }
     return false;
   }
 
@@ -846,22 +1141,78 @@ class TelegramService extends ChangeNotifier {
     return (false, 1, 1);
   }
 
-  int _qualityOrder(String quality) {
-    final q = quality.toLowerCase();
-    if (q.contains('4k') || q.contains('2160')) {
-      if (q.contains('dv')) return 0;
-      if (q.contains('hdr')) return 1;
-      return 2;
-    }
+  /// Comprehensive smart ranking score. HIGHER = better.
+  /// Factors: quality tier, file size (bigger=better within reason), codec
+  /// efficiency, audio language, and recency.
+  /// Pass [preferLang] to boost a specific language (e.g. 'Hindi', 'Dual Audio').
+  int _scoreResult(TelegramSearchResult r, {String? preferLang}) {
+    int score = 0;
+
+    // ── Quality tier (primary) ──────────────────────────────────────────────
+    final q = r.quality.toLowerCase();
     if (q.contains('1080')) {
-      if (q.contains('bluray')) return 3;
-      return 4;
+      score += q.contains('bluray') ? 5000 : 4500; // BluRay > WEB-DL
+    } else if (q.contains('720')) {
+      score += 3000;
+    } else if (q.contains('4k') || q.contains('2160')) {
+      // 4K still scored but lower than 1080p (streaming platform — not for downloading)
+      score += 2000;
+    } else if (q.contains('480')) {
+      score += 1000;
+    } else {
+      score += 500; // Unknown / HD
     }
-    if (q.contains('720')) return 5;
-    if (q.contains('480')) return 6;
-    return 99;
+
+    // ── File size (bigger within range = better quality encode) ────────────
+    final sizeMB = r.fileSize / (1024 * 1024);
+    if (sizeMB > 200 && sizeMB <= 2000) {
+      score += (sizeMB * 0.5).round(); // up to +1000 for 2GB
+    } else if (sizeMB > 2000 && sizeMB <= 4000) {
+      score += 1000; // plateau at 2-4GB
+    } else if (sizeMB > 4000) {
+      score -= 500; // penalise enormous files on streaming platform
+    }
+
+    // ── Video codec ─────────────────────────────────────────────────────────
+    final codec = r.videoCodec?.toUpperCase() ?? '';
+    if (codec == 'HEVC') score += 400; // smaller file, same quality
+    if (codec == 'AV1') score += 300;  // even smaller
+    // AVC gets no bonus (it's the default/worst)
+
+    // ── Audio language preference ────────────────────────────────────────────
+    final audio = r.audioInfo?.toLowerCase() ?? '';
+    if (preferLang != null) {
+      final pref = preferLang.toLowerCase();
+      if (audio.contains(pref)) {
+        score += 2000; // strong boost for preferred language
+      }
+    }
+    // General language scoring
+    if (audio.contains('dual') || audio.contains('multi')) {
+      score += 600;
+    } else if (audio.contains('hindi')) {
+      score += 400;
+    } else if (audio.contains('english')) {
+      score += 200;
+    }
+
+    // ── Recency (newer uploads are better encodes/sources) ──────────────────
+    final ageHours = DateTime.now().difference(r.uploadDate).inHours;
+    if (ageHours < 24) {
+      score += 300;       // uploaded today
+    } else if (ageHours < 168) {
+      score += 150;       // within a week
+    } else if (ageHours < 720) {
+      score += 50;        // within a month
+    }
+
+    // ── Multi-part penalty (single-file preferred for streaming) ───────────
+    if (r.isMultiPart) score -= 500;
+
+    return score;
   }
 }
+
 
 // ── Cache ────────────────────────────────────────────────────────────────────
 
@@ -869,7 +1220,8 @@ class _PendingSearch {
   final Completer<List<TelegramSearchResult>> completer;
   final int? season;
   final int? episode;
-  _PendingSearch(this.completer, this.season, this.episode);
+  final List<String> variations;
+  _PendingSearch(this.completer, this.season, this.episode, this.variations);
 }
 
 class _CachedSearch {
