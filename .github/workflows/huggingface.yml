@@ -1,4 +1,4 @@
-name: Deploy to Hugging Face Space
+name: Deploy Torrent Cache to Hugging Face
 
 on:
   push:
@@ -23,14 +23,21 @@ jobs:
           git config --global user.email "bot@atmos.app"
           git config --global user.name "Atmos CI Bot"
           
-          # Clone the Hugging Face Space repository
-          git clone https://huggingface.co/spaces/nikhil1776/torrentindex hf_space
+          # Clone using token in URL (password auth is deprecated on HF)
+          git clone https://nikhil1776:$HF_TOKEN@huggingface.co/spaces/nikhil1776/torrentindex hf_space || {
+            echo "Clone failed — initializing fresh repo"
+            mkdir -p hf_space
+            cd hf_space
+            git init
+            git remote add origin https://nikhil1776:$HF_TOKEN@huggingface.co/spaces/nikhil1776/torrentindex
+            cd ..
+          }
           
-          # Copy the server files to the cloned space
+          # Copy the server files
           cp -r huggingface-space/* hf_space/
           
-          # Navigate, commit, and push
           cd hf_space
           git add .
-          git commit -m "Deploy from GitHub Actions: ${{ github.sha }}" || echo "No changes to commit"
+          git diff --cached --quiet && echo "No changes to deploy" && exit 0
+          git commit -m "Deploy torrent-cache: $(date -u +%Y-%m-%dT%H:%M:%SZ) | ${GITHUB_SHA:0:7}"
           git push https://nikhil1776:$HF_TOKEN@huggingface.co/spaces/nikhil1776/torrentindex main --force

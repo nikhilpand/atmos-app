@@ -59,6 +59,11 @@ class TelegramDownloadProgress {
 // TDLib runs on a background isolate to keep UI smooth.
 
 class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
+  // Auto-reconnect tracking
+  bool _reconnecting = false;
+  int _reconnectAttempts = 0;
+  static const _maxReconnectAttempts = 3;
+  Timer? _reconnectTimer;
   // AtmosIndex catalog client (works without TDLib login)
   final AtmosIndexClient _indexClient = AtmosIndexClient();
   AtmosIndexClient get indexClient => _indexClient;
@@ -169,7 +174,78 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
       if (_clientId != null) {
         _send(const td.Close());
       }
+    } else if (state == AppLifecycleState.resumed) {
+      // Auto-reconnect on app resume if TDLib disconnected while in background
+      if (!_isInitialized || _authState == TelegramAuthState.uninitialized || _authState == TelegramAuthState.error) {
+        debugPrint('[Telegram] App resumed — TDLib disconnected, attempting auto-reconnect...');
+        _attemptReconnect();
+      }
     }
+  }
+
+  /// Attempt to re-initialize TDLib connection with exponential backoff.
+  Future<void> _attemptReconnect() async {
+    if (_reconnecting) return;
+    _reconnecting = true;
+    _reconnectAttempts = 0;
+
+    while (_reconnectAttempts < _maxReconnectAttempts && !isLoggedIn) {
+      _reconnectAttempts++;
+      debugPrint('[Telegram] Reconnect attempt $_reconnectAttempts/$_maxReconnectAttempts...');
+      try {
+        _isInitialized = false;
+        _authState = TelegramAuthState.uninitialized;
+        // Kill old isolate
+        _receiveIsolate?.kill(priority: Isolate.immediate);
+        _mainReceivePort?.close();
+
+        // Re-create client
+        _clientId = td.TdPlugin.instance.tdCreateClientId();
+        if (_clientId == null) {
+          debugPrint('[Telegram] Reconnect: Failed to create client');
+          continue;
+        }
+
+        // Silence TDLib logs
+        td.TdPlugin.instance.tdSend(0, jsonEncode({'@type': 'setLogVerbosityLevel', 'new_verbosity_level': 0}));
+
+        await _startReceiver();
+        _isInitialized = true;
+        debugPrint('[Telegram] Reconnect: TDLib re-initialized');
+
+        // Wait for auth to settle
+        await Future.delayed(const Duration(seconds: 3));
+        if (isLoggedIn) {
+          debugPrint('[Telegram] ✅ Reconnect successful!');
+          _reconnectAttempts = 0;
+          break;
+        }
+      } catch (e) {
+        debugPrint('[Telegram] Reconnect attempt $_reconnectAttempts failed: $e');
+      }
+      // Exponential backoff: 2s, 4s, 8s
+      if (_reconnectAttempts < _maxReconnectAttempts) {
+        await Future.delayed(Duration(seconds: 1 << _reconnectAttempts));
+      }
+    }
+    _reconnecting = false;
+    notifyListeners();
+  }
+
+  /// Check if TDLib connection is healthy. If not, trigger reconnect.
+  /// Call this before operations that require an active connection.
+  Future<bool> ensureConnected() async {
+    if (isLoggedIn) return true;
+    if (_reconnecting) {
+      // Wait up to 10 seconds for reconnect to complete
+      for (int i = 0; i < 20; i++) {
+        await Future.delayed(const Duration(milliseconds: 500));
+        if (isLoggedIn) return true;
+      }
+      return false;
+    }
+    await _attemptReconnect();
+    return isLoggedIn;
   }
 
   // ── Authentication ────────────────────────────────────────────────────────
@@ -223,6 +299,11 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
   }) async {
     final base = title.trim();
     if (base.isEmpty) return [];
+
+    // Auto-reconnect if disconnected — non-blocking for catalog path
+    if (!isLoggedIn && _isInitialized) {
+      ensureConnected(); // fire-and-forget, catalog will still work
+    }
 
     final cacheKey = '${base.toLowerCase()}_${season ?? ''}_${episode ?? ''}_${preferLang ?? ''}';
     final cached = _searchCache[cacheKey];
@@ -441,8 +522,15 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
   // ── File Download ─────────────────────────────────────────────────────────
 
   /// Download a file by TDLib file ID. Returns the local file path when done.
+  /// Automatically attempts to reconnect if TDLib is disconnected.
   Future<String> downloadFile(int fileId, {int priority = 1}) async {
-    if (!isLoggedIn) throw Exception('Not logged into Telegram');
+    // Auto-reconnect if disconnected
+    if (!isLoggedIn) {
+      final connected = await ensureConnected();
+      if (!connected) {
+        throw Exception('Telegram disconnected and reconnect failed. Please check your connection.');
+      }
+    }
 
     // If already has a completer, return the existing future
     if (_downloadCompleter.containsKey(fileId)) {
@@ -468,7 +556,16 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
       synchronous: false,
     ));
 
-    return completer.future;
+    // Safety timeout — don't hang forever if TDLib stops responding
+    return completer.future.timeout(
+      const Duration(minutes: 30),
+      onTimeout: () {
+        _downloadCompleter.remove(fileId);
+        _downloadProgress.remove(fileId);
+        notifyListeners();
+        throw Exception('Download timed out after 30 minutes');
+      },
+    );
   }
 
   /// Cancel an active download.
@@ -670,6 +767,15 @@ class TelegramService extends ChangeNotifier with WidgetsBindingObserver {
       case td.AuthorizationStateClosed():
         _authState = TelegramAuthState.uninitialized;
         _isInitialized = false;
+        debugPrint('[Telegram] ⚠️ TDLib session closed — will auto-reconnect on next operation');
+        // Schedule auto-reconnect after a brief delay
+        _reconnectTimer?.cancel();
+        _reconnectTimer = Timer(const Duration(seconds: 2), () {
+          if (!isLoggedIn && !_reconnecting) {
+            debugPrint('[Telegram] Auto-reconnecting after AuthorizationStateClosed...');
+            _attemptReconnect();
+          }
+        });
         break;
       default:
         break;

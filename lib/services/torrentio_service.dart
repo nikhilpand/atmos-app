@@ -126,8 +126,8 @@ class TorrentioSource {
   /// NOTE: 4K is excluded — capped at 1080p per user preference.
   int get sortScore {
     int score = seeders;
-    // 4K intentionally scores lower than 1080p — cap quality at 1080p
-    if (quality == '4K') score += 500;
+    // 4K intentionally penalized — capped at 1080p per user preference
+    if (quality == '4K') score -= 1000;
     if (quality == '1080p') score += 2000;
     if (quality == '720p') score += 1000;
     if (codec == 'x265') score += 500; // smaller files, prefer for streaming

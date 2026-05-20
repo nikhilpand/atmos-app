@@ -1,5 +1,4 @@
 import os
-import sys
 import time
 import json
 import logging
@@ -16,419 +15,294 @@ from fastapi.middleware.cors import CORSMiddleware
 import gradio as gr
 
 from google.oauth2 import service_account
+from google.auth.transport.requests import Request as GoogleAuthRequest
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
+from googleapiclient.http import MediaFileUpload
 
-# Setup Logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("TorrentIndex")
 
-# Initialize FastAPI
-app = FastAPI(title="Atmos Torrent-to-Drive Proxy API")
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+app = FastAPI(title="Atmos Backend API")
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
 
-# Global variables
+# ── Config ────────────────────────────────────────────────────────────────────
 GDRIVE_SERVICE_ACCOUNT_JSON = os.environ.get("GDRIVE_SERVICE_ACCOUNT", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 CACHE_EXPIRY_HOURS = int(os.environ.get("CACHE_EXPIRY_HOURS", "24"))
+MAX_FILE_SIZE_GB = float(os.environ.get("MAX_FILE_SIZE_GB", "3"))
 DOWNLOAD_DIR = "/tmp/aria2"
 os.makedirs(DOWNLOAD_DIR, exist_ok=True)
 
-# Active tasks tracking (in-memory)
+_tasks_lock = threading.Lock()
 active_tasks: Dict[str, Dict[str, Any]] = {}
+_creds_lock = threading.Lock()
+_cached_creds: Optional[service_account.Credentials] = None
 
-# Start aria2c daemon
+# ── aria2c ────────────────────────────────────────────────────────────────────
 aria2_process = None
 def start_aria2():
     global aria2_process
     try:
-        logger.info("Starting aria2c daemon...")
         aria2_process = subprocess.Popen([
-            "aria2c",
-            "--enable-rpc=true",
-            "--rpc-listen-all=true",
-            "--rpc-allow-origin-all=true",
-            "--rpc-listen-port=6800",
-            "--max-connection-per-server=16",
-            "--split=16",
-            "--seed-time=0",
-            f"--dir={DOWNLOAD_DIR}",
-            "--quiet=true"
+            "aria2c", "--enable-rpc=true", "--rpc-listen-all=true",
+            "--rpc-allow-origin-all=true", "--rpc-listen-port=6800",
+            "--max-connection-per-server=16", "--split=16", "--seed-time=0",
+            f"--max-overall-download-limit={int(MAX_FILE_SIZE_GB)}G",
+            f"--dir={DOWNLOAD_DIR}", "--quiet=true"
         ])
-        logger.info("aria2c started successfully.")
+        logger.info("aria2c started.")
     except Exception as e:
-        logger.error(f"Failed to start aria2c: {e}")
+        logger.error(f"aria2c start failed: {e}")
 
-# Helper: Google Drive service client
-def get_gdrive_service():
-    if not GDRIVE_SERVICE_ACCOUNT_JSON:
-        raise ValueError("GDRIVE_SERVICE_ACCOUNT environment variable is empty.")
-    try:
-        creds_dict = json.loads(GDRIVE_SERVICE_ACCOUNT_JSON)
+# ── Google Drive helpers ──────────────────────────────────────────────────────
+def _get_credentials() -> service_account.Credentials:
+    global _cached_creds
+    with _creds_lock:
+        if _cached_creds is not None and _cached_creds.valid:
+            return _cached_creds
+        if not GDRIVE_SERVICE_ACCOUNT_JSON:
+            raise ValueError("GDRIVE_SERVICE_ACCOUNT not set")
         creds = service_account.Credentials.from_service_account_info(
-            creds_dict,
+            json.loads(GDRIVE_SERVICE_ACCOUNT_JSON),
             scopes=["https://www.googleapis.com/auth/drive"]
         )
-        return build("drive", "v3", credentials=creds)
-    except Exception as e:
-        logger.error(f"Failed to initialize Google Drive client: {e}")
-        raise
+        creds.refresh(GoogleAuthRequest())
+        _cached_creds = creds
+        return creds
 
-# Helper: Find or create Atmos Cache Folder on GDrive
+def get_gdrive_service():
+    return build("drive", "v3", credentials=_get_credentials())
+
 def get_or_create_cache_folder(service):
-    query = "name = 'Atmos-Cache' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
-    results = service.files().list(q=query, fields="files(id)").execute()
-    files = results.get("files", [])
-    if files:
-        return files[0]["id"]
-    
-    # Create folder
-    folder_metadata = {
-        "name": "Atmos-Cache",
-        "mimeType": "application/vnd.google-apps.folder"
-    }
-    folder = service.files().create(body=folder_metadata, fields="id").execute()
-    return folder["id"]
+    q = "name = 'Atmos-Cache' and mimeType = 'application/vnd.google-apps.folder' and trashed = false"
+    files = service.files().list(q=q, fields="files(id)").execute().get("files", [])
+    if files: return files[0]["id"]
+    return service.files().create(
+        body={"name": "Atmos-Cache", "mimeType": "application/vnd.google-apps.folder"}, fields="id"
+    ).execute()["id"]
 
-# Helper: Call aria2 JSON-RPC
 def aria2_rpc(method: str, params: list = None) -> Any:
-    url = "http://127.0.0.1:6800/jsonrpc"
-    payload = {
-        "jsonrpc": "2.0",
-        "id": "torrentindex",
-        "method": f"aria2.{method}",
-        "params": params or []
-    }
     try:
-        r = requests.post(url, json=payload, timeout=5)
-        if r.status_code == 200:
-            return r.json().get("result")
-        logger.error(f"aria2 RPC status error: {r.status_code} - {r.text}")
-    except Exception as e:
-        logger.error(f"aria2 RPC request failed: {e}")
+        r = requests.post("http://127.0.0.1:6800/jsonrpc", json={
+            "jsonrpc": "2.0", "id": "atmos", "method": f"aria2.{method}", "params": params or []
+        }, timeout=5)
+        if r.status_code == 200: return r.json().get("result")
+    except: pass
     return None
 
-# Task: Upload to Google Drive in background thread
-def upload_task(task_id: str, local_path: str, filename: str):
+# ── Background tasks ──────────────────────────────────────────────────────────
+def upload_task(task_id, local_path, filename):
     try:
-        active_tasks[task_id]["status"] = "uploading"
-        logger.info(f"Uploading {filename} to Google Drive...")
-        
+        with _tasks_lock: active_tasks[task_id]["status"] = "uploading"
         service = get_gdrive_service()
         folder_id = get_or_create_cache_folder(service)
-        
-        file_metadata = {
-            "name": filename,
-            "parents": [folder_id]
-        }
-        
         media = MediaFileUpload(local_path, resumable=True)
-        request = service.files().create(body=file_metadata, media_body=media, fields="id")
-        
-        response = None
-        while response is None:
-            status, response = request.next_chunk()
-            if status:
-                progress = int(status.progress() * 100)
-                active_tasks[task_id]["progress"] = progress
-                logger.info(f"Upload progress for {task_id}: {progress}%")
-                
-        file_id = response.get("id")
-        logger.info(f"Successfully uploaded file to Google Drive. File ID: {file_id}")
-        
-        # Delete local file to free space
-        if os.path.exists(local_path):
-            os.remove(local_path)
-            
-        active_tasks[task_id].update({
-            "status": "completed",
-            "progress": 100,
-            "file_id": file_id,
-            "stream_url": f"/api/stream/{file_id}"
-        })
+        req = service.files().create(body={"name": filename, "parents": [folder_id]}, media_body=media, fields="id")
+        resp = None
+        while resp is None:
+            st, resp = req.next_chunk()
+            if st:
+                with _tasks_lock: active_tasks[task_id]["progress"] = int(st.progress() * 100)
+        file_id = resp.get("id")
+        if os.path.exists(local_path): os.remove(local_path)
+        with _tasks_lock:
+            active_tasks[task_id].update({"status": "completed", "progress": 100, "file_id": file_id, "stream_url": f"/api/stream/{file_id}"})
     except Exception as e:
-        logger.error(f"Upload task failed for {task_id}: {e}")
-        active_tasks[task_id].update({
-            "status": "failed",
-            "error": str(e)
-        })
+        with _tasks_lock: active_tasks[task_id].update({"status": "failed", "error": str(e)})
 
-# Background loop to monitor downloads
 def monitor_downloads_loop():
-    logger.info("Starting download monitor loop...")
+    time.sleep(3)
     while True:
         try:
-            # Query active downloads
-            active = aria2_rpc("tellActive") or []
-            waiting = aria2_rpc("tellWaiting", [0, 50]) or []
-            
-            all_downloads = active + waiting
-            for dl in all_downloads:
-                gid = dl.get("gid")
-                status = dl.get("status")
-                total_length = int(dl.get("totalLength", "0"))
-                completed_length = int(dl.get("completedLength", "0"))
-                
-                # Try to extract filename
+            for dl in (aria2_rpc("tellActive") or []) + (aria2_rpc("tellWaiting", [0, 50]) or []):
+                gid = dl["gid"]
+                total = int(dl.get("totalLength", "0"))
+                done = int(dl.get("completedLength", "0"))
                 files = dl.get("files", [])
-                filename = "Unknown Torrent File"
-                local_path = ""
+                fname = os.path.basename(files[0]["path"]) if files and files[0].get("path") else "Unknown"
+                prog = int(done / total * 100) if total > 0 else 0
+                with _tasks_lock:
+                    active_tasks.setdefault(gid, {}).update({"filename": fname, "status": dl.get("status"), "progress": prog, "total_bytes": total})
+            for dl in (aria2_rpc("tellStopped", [0, 50]) or []):
+                gid, files = dl["gid"], dl.get("files", [])
                 if files and files[0].get("path"):
-                    local_path = files[0]["path"]
-                    filename = os.path.basename(local_path)
-                
-                progress = int((completed_length / total_length) * 100) if total_length > 0 else 0
-                
-                if gid not in active_tasks:
-                    active_tasks[gid] = {
-                        "filename": filename,
-                        "status": status,
-                        "progress": progress,
-                        "total_bytes": total_length
-                    }
-                else:
-                    active_tasks[gid].update({
-                        "status": status,
-                        "progress": progress
-                    })
-            
-            # Check completed downloads
-            stopped = aria2_rpc("tellStopped", [0, 50]) or []
-            for dl in stopped:
-                gid = dl.get("gid")
-                status = dl.get("status")
-                files = dl.get("files", [])
-                
-                if files and files[0].get("path"):
-                    local_path = files[0]["path"]
-                    filename = os.path.basename(local_path)
-                    
-                    if status == "complete" and os.path.exists(local_path):
-                        if gid not in active_tasks or active_tasks[gid]["status"] == "complete":
-                            active_tasks[gid] = {
-                                "filename": filename,
-                                "status": "downloaded",
-                                "progress": 100
-                            }
-                            # Spawn upload thread
-                            threading.Thread(
-                                target=upload_task,
-                                args=(gid, local_path, filename),
-                                daemon=True
-                            ).start()
-                            # Remove from aria2 to clear history
+                    path, fname = files[0]["path"], os.path.basename(files[0]["path"])
+                    if dl["status"] == "complete" and os.path.exists(path):
+                        do_upload = False
+                        with _tasks_lock:
+                            if gid not in active_tasks or active_tasks[gid].get("status") == "complete":
+                                active_tasks[gid] = {"filename": fname, "status": "downloaded", "progress": 100}
+                                do_upload = True
+                        if do_upload:
+                            threading.Thread(target=upload_task, args=(gid, path, fname), daemon=True).start()
                             aria2_rpc("removeDownloadResult", [gid])
-                    elif status == "error":
-                        active_tasks[gid] = {
-                            "filename": filename,
-                            "status": "failed",
-                            "error": "Aria2 download error"
-                        }
+                    elif dl["status"] == "error":
+                        with _tasks_lock: active_tasks[gid] = {"filename": fname, "status": "failed", "error": "aria2 error"}
                         aria2_rpc("removeDownloadResult", [gid])
-                        
-        except Exception as e:
-            logger.error(f"Error in monitor loop: {e}")
+        except Exception as e: logger.error(f"Monitor: {e}")
         time.sleep(3)
 
-# Background loop to cleanup old GDrive files (Auto-Expiry Cache)
-def cleanup_old_files_loop():
-    logger.info(f"Starting GDrive cleanup loop (expiry = {CACHE_EXPIRY_HOURS} hours)...")
+def cleanup_loop():
+    time.sleep(30)
     while True:
         try:
             if GDRIVE_SERVICE_ACCOUNT_JSON:
-                service = get_gdrive_service()
-                folder_id = get_or_create_cache_folder(service)
-                
-                # List files in the cache folder
-                query = f"'{folder_id}' in parents and trashed = false"
-                results = service.files().list(
-                    q=query,
-                    fields="files(id, name, createdTime)"
-                ).execute()
-                files = results.get("files", [])
-                
+                svc = get_gdrive_service()
+                fid = get_or_create_cache_folder(svc)
                 now = datetime.now(timezone.utc)
-                for f in files:
-                    file_id = f["id"]
-                    file_name = f["name"]
-                    created_time_str = f["createdTime"].replace("Z", "+00:00")
-                    created_time = datetime.fromisoformat(created_time_str)
-                    
-                    age = now - created_time
-                    if age > timedelta(hours=CACHE_EXPIRY_HOURS):
-                        logger.info(f"Deleting expired file '{file_name}' ({file_id}) older than {CACHE_EXPIRY_HOURS}h...")
-                        service.files().delete(fileId=file_id).execute()
-        except Exception as e:
-            logger.error(f"Error in cleanup loop: {e}")
-        # Run every 30 minutes
+                for f in svc.files().list(q=f"'{fid}' in parents and trashed = false", fields="files(id,name,createdTime)").execute().get("files", []):
+                    created = datetime.fromisoformat(f["createdTime"].replace("Z", "+00:00"))
+                    if now - created > timedelta(hours=CACHE_EXPIRY_HOURS):
+                        logger.info(f"Deleting expired: {f['name']}")
+                        svc.files().delete(fileId=f["id"]).execute()
+        except Exception as e: logger.error(f"Cleanup: {e}")
         time.sleep(1800)
 
-# ── FastAPI Routes ─────────────────────────────────────────────────────────────
+# ── FastAPI startup ───────────────────────────────────────────────────────────
+@app.on_event("startup")
+def on_startup():
+    start_aria2()
+    threading.Thread(target=monitor_downloads_loop, daemon=True).start()
+    threading.Thread(target=cleanup_loop, daemon=True).start()
+    logger.info("All background threads started.")
+
+# ── Torrent Cache API ─────────────────────────────────────────────────────────
+@app.get("/api/health")
+async def health():
+    return {
+        "status": "ok" if aria2_rpc("getVersion") and GDRIVE_SERVICE_ACCOUNT_JSON else "degraded",
+        "aria2": aria2_rpc("getVersion") is not None,
+        "gdrive": bool(GDRIVE_SERVICE_ACCOUNT_JSON),
+        "gemini": bool(GEMINI_API_KEY),
+        "cache_expiry_hours": CACHE_EXPIRY_HOURS,
+    }
 
 @app.post("/api/torrent-to-drive")
-async def start_torrent_to_drive(payload: Dict[str, str]):
+async def torrent_to_drive(payload: Dict[str, str]):
     magnet = payload.get("magnet_link")
-    if not magnet:
-        raise HTTPException(status_code=400, detail="Missing magnet_link")
-        
-    # Check GDrive config
-    if not GDRIVE_SERVICE_ACCOUNT_JSON:
-        raise HTTPException(status_code=500, detail="GDrive service account credentials are not configured on Space Secrets.")
-        
-    # Add uri/magnet to aria2
+    if not magnet: raise HTTPException(400, "Missing magnet_link")
+    if not GDRIVE_SERVICE_ACCOUNT_JSON: raise HTTPException(500, "GDrive not configured")
     gid = aria2_rpc("addUri", [[magnet]])
-    if not gid:
-        raise HTTPException(status_code=500, detail="Failed to add download to aria2")
-        
-    active_tasks[gid] = {
-        "filename": "Querying Torrent Metadata...",
-        "status": "active",
-        "progress": 0,
-        "total_bytes": 0
-    }
+    if not gid: raise HTTPException(500, "aria2 failed")
+    with _tasks_lock: active_tasks[gid] = {"filename": "Querying...", "status": "active", "progress": 0}
     return {"task_id": gid, "status": "active"}
 
 @app.get("/api/status/{task_id}")
-async def get_task_status(task_id: str):
-    if task_id not in active_tasks:
-        raise HTTPException(status_code=404, detail="Task not found")
-    return active_tasks[task_id]
+async def task_status(task_id: str):
+    with _tasks_lock:
+        if task_id not in active_tasks: raise HTTPException(404, "Not found")
+        return dict(active_tasks[task_id])
 
 @app.get("/api/stream/{file_id}")
-async def stream_gdrive_file(file_id: str, range: Optional[str] = Header(None)):
-    """
-    Proxies stream chunks directly from Google Drive with support for HTTP Range requests.
-    This lets the Flutter player seek through the video without needing Google API keys.
-    """
+async def stream_file(file_id: str, range_header: Optional[str] = Header(None, alias="range")):
     try:
-        service = get_gdrive_service()
-        
-        # Get metadata
-        meta = service.files().get(fileId=file_id, fields="name, size, mimeType").execute()
-        file_size = int(meta.get("size", 0))
-        mime_type = meta.get("mimeType", "video/mp4")
-        
-        headers = {}
-        if range:
-            headers["Range"] = range
-            
-        # Call GDrive direct media download endpoint
-        url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media"
-        # Get OAuth token
-        creds_dict = json.loads(GDRIVE_SERVICE_ACCOUNT_JSON)
-        creds = service_account.Credentials.from_service_account_info(
-            creds_dict,
-            scopes=["https://www.googleapis.com/auth/drive"]
-        )
-        # Refresh credential to get access token
-        creds.refresh(requests.Request())
-        
-        api_headers = {
-            "Authorization": f"Bearer {creds.token}"
-        }
-        if range:
-            api_headers["Range"] = range
-            
-        r = requests.get(url, headers=api_headers, stream=True, timeout=10)
-        
-        # Build response headers
-        response_headers = {
-            "Content-Type": mime_type,
-            "Accept-Ranges": "bytes",
-            "Access-Control-Allow-Origin": "*",
-            "Content-Disposition": f'inline; filename="{meta.get("name")}"'
-        }
-        if "Content-Range" in r.headers:
-            response_headers["Content-Range"] = r.headers["Content-Range"]
-        if "Content-Length" in r.headers:
-            response_headers["Content-Length"] = r.headers["Content-Length"]
-            
-        # Return StreamingResponse with chunks
-        return StreamingResponse(
-            r.iter_content(chunk_size=1024*1024), # 1MB chunk size
-            status_code=r.status_code,
-            headers=response_headers
-        )
+        svc = get_gdrive_service()
+        meta = svc.files().get(fileId=file_id, fields="name,size,mimeType").execute()
+        creds = _get_credentials()
+        hdrs = {"Authorization": f"Bearer {creds.token}"}
+        if range_header: hdrs["Range"] = range_header
+        r = requests.get(f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media", headers=hdrs, stream=True, timeout=30)
+        resp_hdrs = {"Content-Type": meta.get("mimeType", "video/mp4"), "Accept-Ranges": "bytes", "Access-Control-Allow-Origin": "*"}
+        if "Content-Range" in r.headers: resp_hdrs["Content-Range"] = r.headers["Content-Range"]
+        if "Content-Length" in r.headers: resp_hdrs["Content-Length"] = r.headers["Content-Length"]
+        return StreamingResponse(r.iter_content(1024*1024), status_code=r.status_code, headers=resp_hdrs)
     except Exception as e:
-        logger.error(f"Stream proxy failed: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(500, str(e))
 
-# ── Gradio Web UI ─────────────────────────────────────────────────────────────
+# ── Gemini AI API ─────────────────────────────────────────────────────────────
+@app.post("/api/gemini/recommend")
+async def gemini_recommend(payload: Dict[str, Any]):
+    """Personalized content recommendations based on watch history."""
+    if not GEMINI_API_KEY: raise HTTPException(500, "GEMINI_API_KEY not configured")
+    prompt = f"""You are a movie/TV show recommendation engine.
+Based on the user's viewing history and preferences, suggest 20 personalized recommendations.
 
+Watch History (most recent first): {json.dumps(payload.get("watch_history", [])[:20])}
+Recent Searches: {json.dumps(payload.get("search_history", [])[:10])}
+Preferred Genres: {json.dumps(payload.get("preferred_genres", []))}
+Preferred Language: {payload.get("preferred_lang", "English")}
+
+Return a JSON array of objects with:
+- "title": exact movie/show title
+- "tmdb_id": TMDB ID if known, else 0
+- "type": "movie" or "tv"
+- "reason": 1-line explanation
+- "category": one of "Because You Watched", "Trending in Your Taste", "Hidden Gems", "New Releases", "Genre Deep Dive"
+- "confidence": 0.0-1.0
+
+Prioritize quality hidden gems over obvious mainstream picks.
+Return ONLY valid JSON array."""
+    try:
+        r = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}",
+            json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"responseMimeType": "application/json"}},
+            timeout=15
+        )
+        if r.status_code != 200: raise HTTPException(502, f"Gemini {r.status_code}")
+        text = r.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "[]")
+        return {"recommendations": json.loads(text.strip())}
+    except json.JSONDecodeError: raise HTTPException(502, "Gemini returned invalid JSON")
+    except HTTPException: raise
+    except Exception as e: raise HTTPException(500, str(e))
+
+@app.post("/api/gemini/categorize")
+async def gemini_categorize(payload: Dict[str, Any]):
+    """AI-generated Netflix-style category names for home screen."""
+    if not GEMINI_API_KEY: raise HTTPException(500, "GEMINI_API_KEY not configured")
+    prompt = f"""Create 8 personalized content category names for a streaming app home screen.
+User watches: {json.dumps(payload.get("watch_history", [])[:15])}
+Preferred genres: {json.dumps(payload.get("preferred_genres", []))}
+
+Return JSON array with:
+- "category_name": creative Netflix-style name
+- "description": what belongs here
+- "tmdb_genre_ids": array of TMDB genre IDs
+- "sort_by": "popularity.desc" or "vote_average.desc" or "release_date.desc"
+
+Good examples: "Mind-Bending Thrillers", "Anime After Dark", "Feel-Good Weekend Picks"
+Return ONLY valid JSON."""
+    try:
+        r = requests.post(
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}",
+            json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"responseMimeType": "application/json"}},
+            timeout=15
+        )
+        if r.status_code != 200: raise HTTPException(502, f"Gemini {r.status_code}")
+        text = r.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "[]")
+        return {"categories": json.loads(text.strip())}
+    except json.JSONDecodeError: raise HTTPException(502, "Gemini returned invalid JSON")
+    except HTTPException: raise
+    except Exception as e: raise HTTPException(500, str(e))
+
+# ── Gradio UI ─────────────────────────────────────────────────────────────────
 def get_status_ui():
-    out = []
-    # System Status
-    gdrive_status = "✅ Connected" if GDRIVE_SERVICE_ACCOUNT_JSON else "❌ Credentials Missing (Check Secret GDRIVE_SERVICE_ACCOUNT)"
-    out.append(f"### Server Status\n- **Google Drive Integration**: {gdrive_status}\n- **Cache Expiry Duration**: {CACHE_EXPIRY_HOURS} Hours\n\n")
-    
-    # Active Tasks Table
-    out.append("### Active Caching Operations\n")
-    if not active_tasks:
-        out.append("No active download or upload tasks.")
-    else:
-        for tid, details in active_tasks.items():
-            prog = details.get("progress", 0)
-            status = details.get("status", "unknown")
-            filename = details.get("filename", "Unknown file")
-            url = details.get("stream_url", "")
-            
-            # Make beautiful markdown rows
-            prog_bar = "█" * (prog // 10) + "░" * (10 - (prog // 10))
-            out.append(f"**Task ID**: `{tid}`\n")
-            out.append(f"- File: `{filename}`\n")
-            out.append(f"- Status: **{status.upper()}**\n")
-            out.append(f"- Progress: `[{prog_bar}] {prog}%`\n")
-            if url:
-                out.append(f"- Stream Link: [Play Direct]({url})\n")
-            out.append("\n---\n")
-            
-    return "".join(out)
+    lines = [f"### Status\n- **GDrive**: {'✅' if GDRIVE_SERVICE_ACCOUNT_JSON else '❌'}\n- **Gemini**: {'✅' if GEMINI_API_KEY else '❌'}\n- **Cache TTL**: {CACHE_EXPIRY_HOURS}h\n\n### Tasks\n"]
+    with _tasks_lock: snap = dict(active_tasks)
+    if not snap: lines.append("No active tasks.")
+    for tid, d in snap.items():
+        p = d.get("progress", 0)
+        lines.append(f"`{tid}` | {d.get('filename','?')} | **{d.get('status','?').upper()}** | `[{'█'*(p//10)}{'░'*(10-p//10)}] {p}%`\n")
+    return "".join(lines)
 
-def trigger_manual_download(magnet):
-    if not magnet:
-        return "Please input a valid magnet link."
-    if not GDRIVE_SERVICE_ACCOUNT_JSON:
-        return "Error: GDrive credentials are not configured."
+def manual_dl(magnet):
+    if not magnet: return "Enter a magnet link."
     gid = aria2_rpc("addUri", [[magnet]])
-    if not gid:
-        return "Failed to add to aria2 queue."
-    active_tasks[gid] = {
-        "filename": "Querying Torrent Metadata...",
-        "status": "active",
-        "progress": 0,
-        "total_bytes": 0
-    }
-    return f"Successfully queued download with Task ID: `{gid}`"
+    if not gid: return "Failed."
+    with _tasks_lock: active_tasks[gid] = {"filename": "Querying...", "status": "active", "progress": 0}
+    return f"Queued: `{gid}`"
 
-# Build Gradio block
-with gr.Blocks(title="TorrentIndex Cache Admin") as demo:
-    gr.Markdown("# Atmos Torrent Caching Server")
-    gr.Markdown("This interface shows status of background torrent caching and allows manual uploads.")
-    
-    with gr.Tab("Downloads Status"):
-        status_md = gr.Markdown()
-        demo.load(get_status_ui, outputs=[status_md], every=5)
-        
-    with gr.Tab("Manual Cache Trigger"):
-        magnet_input = gr.Textbox(label="Torrent Magnet Link / Torrent File URL")
-        submit_btn = gr.Button("Start Caching")
-        output_txt = gr.Textbox(label="Result")
-        submit_btn.click(trigger_manual_download, inputs=[magnet_input], outputs=[output_txt])
+with gr.Blocks(title="Atmos Backend") as demo:
+    gr.Markdown("# Atmos Backend — Torrent Cache + AI")
+    with gr.Tab("Status"):
+        md = gr.Markdown()
+        demo.load(get_status_ui, outputs=[md], every=5)
+    with gr.Tab("Manual Cache"):
+        inp = gr.Textbox(label="Magnet Link")
+        btn = gr.Button("Start")
+        out = gr.Textbox(label="Result")
+        btn.click(manual_dl, inputs=[inp], outputs=[out])
 
-# Mount FastAPI onto Gradio app
 demo_app = gr.mount_gradio_app(app, demo, path="/")
 
-# Start background daemon threads & server boot
 if __name__ == "__main__":
-    start_aria2()
-    # Monitor threads
-    threading.Thread(target=monitor_downloads_loop, daemon=True).start()
-    threading.Thread(target=cleanup_old_files_loop, daemon=True).start()
-    
-    # Run Uvicorn
     uvicorn.run(demo_app, host="0.0.0.0", port=7860)
