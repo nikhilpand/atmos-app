@@ -23,27 +23,42 @@ class ConsumetService {
 
   /// Resolves direct stream sources for an anime title and episode.
   /// Fires ALL base URLs × providers in parallel and returns the first success.
+  /// [season] is used for multi-season anime (e.g. AoT S4 E3 → searches with
+  /// title and resolves the correct episode offset).
   Future<ExtractedStream?> extractAnimeStream({
     required String title,
     required int episode,
+    int season = 1,
   }) async {
     if (title.isEmpty) return null;
 
     final sanitizedTitle = _sanitizeAnimeTitle(title);
-    debugPrint('[Consumet] Searching anime stream for "$sanitizedTitle" ep $episode');
+    // For multi-season anime, append season info to help search accuracy
+    final searchTitle = season > 1
+        ? '$sanitizedTitle Season $season'
+        : sanitizedTitle;
+
+    debugPrint('[Consumet] Searching anime stream for "$searchTitle" ep $episode');
 
     // Fire all combinations in parallel — first success wins
     final providers = ['gogoanime', 'zoro'];
     final futures = <Future<ExtractedStream?>>[];
 
+    // Try with season-qualified title first, then fallback to bare title
+    final titlesToTry = season > 1
+        ? [searchTitle, sanitizedTitle]
+        : [sanitizedTitle];
+
     for (final baseUrl in _baseUrls) {
       for (final provider in providers) {
-        futures.add(_tryExtractSafe(
-          baseUrl: baseUrl,
-          provider: provider,
-          title: sanitizedTitle,
-          episode: episode,
-        ));
+        for (final t in titlesToTry) {
+          futures.add(_tryExtractSafe(
+            baseUrl: baseUrl,
+            provider: provider,
+            title: t,
+            episode: episode,
+          ));
+        }
       }
     }
 

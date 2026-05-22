@@ -572,7 +572,7 @@ class _TelegramLoginSheetState extends State<_TelegramLoginSheet> {
       final isCompleted = activeStep > index;
       final color = isActive
           ? cs.primary
-          : (isCompleted ? cs.primary.withOpacity(0.7) : cs.onSurfaceVariant.withOpacity(0.3));
+          : (isCompleted ? cs.primary.withValues(alpha: 0.7) : cs.onSurfaceVariant.withValues(alpha: 0.3));
 
       return Expanded(
         child: Column(
@@ -591,7 +591,7 @@ class _TelegramLoginSheetState extends State<_TelegramLoginSheet> {
                   decoration: BoxDecoration(
                     color: isActive ? cs.primaryContainer : (isCompleted ? cs.primary : Colors.transparent),
                     border: Border.all(
-                      color: isActive ? cs.primary : cs.onSurfaceVariant.withOpacity(0.3),
+                      color: isActive ? cs.primary : cs.onSurfaceVariant.withValues(alpha: 0.3),
                       width: 2,
                     ),
                     shape: BoxShape.circle,
@@ -604,7 +604,7 @@ class _TelegramLoginSheetState extends State<_TelegramLoginSheet> {
                             style: TextStyle(
                               fontSize: 12,
                               fontWeight: FontWeight.bold,
-                              color: isActive ? cs.onPrimaryContainer : cs.onSurfaceVariant.withOpacity(0.5),
+                              color: isActive ? cs.onPrimaryContainer : cs.onSurfaceVariant.withValues(alpha: 0.5),
                             ),
                           ),
                   ),
@@ -623,7 +623,7 @@ class _TelegramLoginSheetState extends State<_TelegramLoginSheet> {
               style: TextStyle(
                 fontSize: 10,
                 fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
-                color: isActive ? cs.primary : cs.onSurfaceVariant.withOpacity(0.6),
+                color: isActive ? cs.primary : cs.onSurfaceVariant.withValues(alpha: 0.6),
               ),
             ),
           ],
@@ -654,7 +654,7 @@ class _TelegramLoginSheetState extends State<_TelegramLoginSheet> {
             Expanded(child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
               Text('Connect Telegram', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.bold)),
               Text('For lightning-fast CDN downloads',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant.withOpacity(0.7))),
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant.withValues(alpha: 0.7))),
             ])),
           ]),
           const SizedBox(height: AppSpacing.lg),
@@ -673,9 +673,9 @@ class _TelegramLoginSheetState extends State<_TelegramLoginSheet> {
           if (_error != null || widget.telegram.errorMessage != null) ...[
             Container(
               decoration: BoxDecoration(
-                color: cs.errorContainer.withOpacity(0.7),
+                color: cs.errorContainer.withValues(alpha: 0.7),
                 borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: cs.error.withOpacity(0.3)),
+                border: Border.all(color: cs.error.withValues(alpha: 0.3)),
               ),
               padding: const EdgeInsets.all(AppSpacing.md),
               child: Row(children: [
@@ -745,7 +745,7 @@ class _TelegramLoginSheetState extends State<_TelegramLoginSheet> {
                 Text('Enter OTP Code', style: Theme.of(context).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w600)),
                 const SizedBox(height: AppSpacing.xs),
                 Text('Sent to ${widget.telegram.phone ?? _phoneController.text}',
-                    style: Theme.of(context).textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant.withOpacity(0.7))),
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant.withValues(alpha: 0.7))),
                 const SizedBox(height: AppSpacing.md),
                 TextField(
                   controller: _otpController,
@@ -763,7 +763,7 @@ class _TelegramLoginSheetState extends State<_TelegramLoginSheet> {
                   ],
                   decoration: InputDecoration(
                     hintText: '••••••',
-                    hintStyle: TextStyle(color: cs.onSurfaceVariant.withOpacity(0.3), letterSpacing: 12),
+                    hintStyle: TextStyle(color: cs.onSurfaceVariant.withValues(alpha: 0.3), letterSpacing: 12),
                     filled: true,
                     fillColor: cs.surfaceContainerHigh,
                     border: OutlineInputBorder(
