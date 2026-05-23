@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import '../models/media_model.dart';
 import '../models/download_model.dart';
@@ -37,6 +38,15 @@ class _EpisodeTileState extends State<EpisodeTile> {
 
     return Focus(
       onFocusChange: (v) => setState(() => _isFocused = v),
+      onKeyEvent: (FocusNode node, KeyEvent event) {
+        if (event is KeyDownEvent &&
+            (event.logicalKey == LogicalKeyboardKey.enter ||
+                event.logicalKey == LogicalKeyboardKey.select)) {
+          widget.onTap();
+          return KeyEventResult.handled;
+        }
+        return KeyEventResult.ignored;
+      },
       child: GestureDetector(
         onTap: widget.onTap,
         child: AnimatedContainer(

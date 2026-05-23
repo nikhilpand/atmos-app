@@ -6,6 +6,9 @@ import subprocess
 import threading
 from datetime import datetime, timedelta, timezone
 from typing import Dict, Any, Optional
+import re
+import html
+import urllib.parse
 
 import requests
 import uvicorn
@@ -272,6 +275,289 @@ Return ONLY valid JSON."""
     except json.JSONDecodeError: raise HTTPException(502, "Gemini returned invalid JSON")
     except HTTPException: raise
     except Exception as e: raise HTTPException(500, str(e))
+
+# ── VegaMovies & Consumet Scrapers ────────────────────────────────────────────
+ANINEKO_HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Referer': 'https://anineko.to/'
+}
+
+def clean_anime_title(title: str) -> str:
+    return html.unescape(title).strip()
+
+@app.get("/vegamovies/search")
+async def vegamovies_search(q: str, year: Optional[int] = None, quality: Optional[str] = None):
+    url = "https://vegamovies.diamonds/index.php?do=search"
+    data = {
+        "do": "search",
+        "subaction": "search",
+        "story": q
+    }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://vegamovies.diamonds/"
+    }
+    try:
+        r = requests.post(url, data=data, headers=headers, timeout=10)
+        if r.status_code != 200:
+            return {"results": []}
+        
+        html_content = r.text
+        articles = re.findall(r'<article class="post-item site__col">[\s\S]*?</article>', html_content)
+        results = []
+        for art in articles:
+            url_m = re.search(r'href="(https://vegamovies\.diamonds/\d+-[^"]+\.html)"', art)
+            title_m = re.search(r'title="([^"]+)"', art)
+            img_m = re.search(r'src="([^"]+)"', art)
+            
+            if url_m and title_m:
+                post_url = url_m.group(1)
+                title = html.unescape(title_m.group(1))
+                poster = img_m.group(1) if img_m else None
+                if poster and poster.startswith('/'):
+                    poster = 'https://vegamovies.diamonds' + poster
+                
+                year_m = re.search(r'\((\d{4})\)', title)
+                item_year = year_m.group(1) if year_m else None
+                
+                qual_m = re.search(r'\b(480p|720p|1080p|2160p|4k|HDR)\b', title, re.I)
+                item_quality = qual_m.group(1).upper() if qual_m else 'HD'
+                
+                lang_m = re.search(r'\b(Hindi|English|Tamil|Telugu|Dual Audio|Multi Audio)\b', title, re.I)
+                language = lang_m.group(1) if lang_m else 'Hindi/English'
+                
+                if year and item_year and str(year) != item_year:
+                    continue
+                if quality and quality.lower() not in title.lower():
+                    continue
+                    
+                results.append({
+                    "title": title,
+                    "post_url": post_url,
+                    "poster_url": poster,
+                    "year": item_year,
+                    "quality": item_quality,
+                    "language": language
+                })
+        return {"results": results}
+    except Exception as e:
+        logger.error(f"VegaMovies search error: {e}")
+        return {"results": []}
+
+@app.get("/vegamovies/links")
+async def vegamovies_links(url: str):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Referer": "https://vegamovies.diamonds/"
+    }
+    try:
+        r = requests.get(url, headers=headers, timeout=10)
+        if r.status_code != 200:
+            return {"links": []}
+        
+        html_content = r.text
+        links = []
+        pattern = re.compile(
+            r'href=["\'](https?://[^"\']+)["\'](?:(?!<a\b)[\s\S])*?Click Here To Download\s*(?:\[([^\]]+)\])?',
+            re.I
+        )
+        
+        for match in pattern.finditer(html_content):
+            dl_url = match.group(1)
+            size = match.group(2) or None
+            if size:
+                size = size.strip()
+                
+            start_idx = match.start()
+            context_before = html_content[max(0, start_idx - 1000):start_idx]
+            
+            res_matches = list(re.finditer(r'\b(480p|720p|1080p|2160p|4K|360p)\b', context_before, re.I))
+            quality = res_matches[-1].group(1).upper() if res_matches else 'HD'
+            
+            host = 'direct'
+            url_lower = dl_url.lower()
+            if 'drive.google' in url_lower or 'docs.google' in url_lower:
+                host = 'gdrive'
+            elif 'pixeldrain' in url_lower:
+                host = 'pixeldrain'
+            elif 'hubcloud' in url_lower or 'hub.la' in url_lower or 'hubcdn' in url_lower:
+                host = 'hubcloud'
+            elif 'nexdrive' in url_lower:
+                host = 'nexdrive'
+            elif 'vgmlinks' in url_lower:
+                host = 'vgmlinks'
+            elif 'fast-dl' in url_lower:
+                host = 'fast-dl'
+            elif 'onedrive' in url_lower or '1drv.ms' in url_lower:
+                host = 'onedrive'
+                
+            codec_match = re.search(r'\b(x265|HEVC|x264|AVC|AV1)\b', context_before, re.I)
+            codec = codec_match.group(1).lower().replace('hevc', 'x265').replace('avc', 'x264') if codec_match else None
+            
+            lang_match = re.search(r'\b(Hindi|English|Tamil|Telugu|Malayalam|Dual Audio|Multi Audio|Dubbed)\b', context_before, re.I)
+            language = lang_match.group(1) if lang_match else 'Hindi/English'
+            
+            links.append({
+                'url': dl_url,
+                'host': host,
+                'quality': quality,
+                'size': size,
+                'codec': codec,
+                'language': language
+            })
+        return {"links": links}
+    except Exception as e:
+        logger.error(f"VegaMovies links error: {e}")
+        return {"links": []}
+
+@app.get("/anime/{provider}/{title}")
+async def anime_search(provider: str, title: str):
+    encoded = urllib.parse.quote(title)
+    url = f"https://anineko.to/browser?keyword={encoded}"
+    try:
+        r = requests.get(url, headers=ANINEKO_HEADERS, timeout=10)
+        if r.status_code != 200:
+            return {"results": []}
+        
+        cards = re.findall(r'<a class="nv-anime-thumb nv-browse-thumb"[\s\S]*?</a>', r.text)
+        results = []
+        for card in cards:
+            id_m = re.search(r'href="/watch/([^"]+)"', card)
+            img_m = re.search(r'src="([^"]+)"', card)
+            alt_m = re.search(r'alt="([^"]+)"', card)
+            type_m = re.search(r'<span class="nv-badge-new">([^<]+)</span>', card)
+            
+            if id_m:
+                anime_id = id_m.group(1)
+                anime_title = clean_anime_title(alt_m.group(1)) if alt_m else anime_id.replace('-', ' ').title()
+                image = img_m.group(1) if img_m else ""
+                anime_type = type_m.group(1) if type_m else "TV"
+                
+                results.append({
+                    "id": anime_id,
+                    "title": anime_title,
+                    "image": image,
+                    "type": anime_type
+                })
+        return {"results": results}
+    except Exception as e:
+        logger.error(f"Anime search error: {e}")
+        return {"results": []}
+
+@app.get("/anime/{provider}/info/{anime_id:path}")
+async def anime_info(provider: str, anime_id: str):
+    anime_id = anime_id.lstrip('/')
+    url = f"https://anineko.to/watch/{anime_id}"
+    try:
+        r = requests.get(url, headers=ANINEKO_HEADERS, timeout=10)
+        if r.status_code != 200:
+            raise HTTPException(status_code=404, detail="Anime not found")
+        
+        html_content = r.text
+        title_m = re.search(r'<h1>(.*?)</h1>', html_content)
+        title = clean_anime_title(title_m.group(1)) if title_m else anime_id.replace('-', ' ').title()
+        
+        pattern = re.compile(
+            r'<a class="nv-info-episode-main" href="(?P<href>/watch/[^"]+/ep-(?P<num>\d+))">\s*'
+            r'<strong>Episode \d+</strong>\s*'
+            r'<span>(?P<title>[^<]+)</span>\s*'
+            r'</a>',
+            re.I
+        )
+        
+        episodes = []
+        for match in pattern.finditer(html_content):
+            ep_href = match.group('href').replace('/watch/', '')
+            ep_num = int(match.group('num'))
+            ep_title = clean_anime_title(match.group('title'))
+            episodes.append({
+                "id": ep_href,
+                "number": ep_num,
+                "title": ep_title
+            })
+            
+        episodes.sort(key=lambda x: x['number'])
+        return {
+            "id": anime_id,
+            "title": title,
+            "episodes": episodes
+        }
+    except Exception as e:
+        logger.error(f"Anime info error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/anime/{provider}/watch/{episode_id:path}")
+async def anime_watch(provider: str, episode_id: str):
+    episode_id = episode_id.lstrip('/')
+    url = f"https://anineko.to/watch/{episode_id}"
+    try:
+        r = requests.get(url, headers=ANINEKO_HEADERS, timeout=10)
+        if r.status_code != 200:
+            raise HTTPException(status_code=404, detail="Episode not found")
+            
+        html_content = r.text
+        sources = []
+        subtitles = []
+        
+        for btn in re.finditer(r'<button[^>]+data-video="(?P<url>[^"]+)"[^>]*>', html_content):
+            btn_html = btn.group(0)
+            video_url = btn.group('url')
+            
+            if 'vibeplayer.site' in video_url:
+                tab_match = re.search(r'data-tab="([^"]+)"', btn_html)
+                tab = tab_match.group(1) if tab_match else 'tab_1'
+                
+                tab_label = "Sub"
+                if tab == 'tab_0':
+                    tab_label = "Hardsub"
+                elif tab == 'tab_2':
+                    tab_label = "Dub"
+                    
+                parsed = urllib.parse.urlparse(video_url)
+                vibe_id = parsed.path.strip('/')
+                
+                qs = urllib.parse.parse_qs(parsed.query)
+                sub_url = qs.get('sub', [None])[0]
+                if sub_url:
+                    subtitles.append({
+                        "url": sub_url,
+                        "lang": "English"
+                    })
+                
+                direct_stream = f"https://vibeplayer.site/public/stream/{vibe_id}/master.m3u8"
+                tag_end = html_content.find('>', btn.start())
+                btn_end = html_content.find('</button>', tag_end)
+                btn_text = html_content[tag_end+1:btn_end].strip() if tag_end != -1 and btn_end != -1 else "HD"
+                btn_text = re.sub(r'<[^>]+>', '', btn_text).strip()
+                btn_text = ' '.join(btn_text.split())
+                
+                quality_label = f"{tab_label} ({btn_text})"
+                sources.append({
+                    "url": direct_stream,
+                    "quality": quality_label,
+                    "isM3U8": True
+                })
+        
+        if not sources:
+            direct_matches = re.findall(r'vibeplayer\.site/([a-zA-Z0-9]+)', html_content)
+            for vibe_id in set(direct_matches):
+                sources.append({
+                    "url": f"https://vibeplayer.site/public/stream/{vibe_id}/master.m3u8",
+                    "quality": "Backup HD",
+                    "isM3U8": True
+                })
+        
+        return {
+            "sources": sources,
+            "subtitles": subtitles,
+            "headers": {
+                "User-Agent": ANINEKO_HEADERS['User-Agent'],
+                "Referer": "https://vibeplayer.site/"
+            }
+        }
+    except Exception as e:
+        logger.error(f"Anime watch error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ── Gradio UI ─────────────────────────────────────────────────────────────────
 def get_status_ui():

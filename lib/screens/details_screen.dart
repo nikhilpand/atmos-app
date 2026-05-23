@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:go_router/go_router.dart';
@@ -97,13 +98,10 @@ class _DetailsContent extends ConsumerWidget {
           expandedHeight: isWide ? 500.0 : 400.0,
           pinned: true,
           backgroundColor: Theme.of(context).colorScheme.surface,
-          leading: Focus(
-            autofocus: false,
-            child: IconButton(
-              onPressed: () => context.pop(),
-              icon: const Icon(Icons.arrow_back_ios_new_rounded),
-              color: Theme.of(context).colorScheme.onSurface,
-            ),
+          leading: IconButton(
+            onPressed: () => context.pop(),
+            icon: const Icon(Icons.arrow_back_ios_new_rounded),
+            color: Theme.of(context).colorScheme.onSurface,
           ),
           actions: [
             // Watchlist bookmark button
@@ -489,131 +487,235 @@ class _PlayButtonState extends ConsumerState<_PlayButton> {
   }
 
   void _onDownload() async {
-    final telegram = ref.read(telegramServiceProvider);
-    if (!telegram.isLoggedIn) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Log in to Telegram in Settings to download'),
-          backgroundColor: Colors.orange,
-        ),
-      );
-      return;
-    }
+    final choice = await _DownloadSourcePickerSheet.show(context, details: widget.details);
+    if (!mounted || choice == null) return;
 
-    // ── Step 1: Show quality/audio filter picker ──────────────────────────
-    final filters = await DownloadFilterSheet.show(
-      context,
-      title: widget.details.title,
-    );
-    if (!mounted || filters == null) return; // user dismissed
-
-    setState(() => _loadingDownload = true);
-    try {
-      // ── Step 2: Build search futures (quality hint appended to Telegram query)
-      final futures = <Future<List<QualityOption>>>[];
-
-      // Append filter hints so TDLib search is more precise
-      final hint = filters.searchHint;
-      final queryTitle = hint.isNotEmpty
-          ? '${widget.details.title} $hint'
-          : widget.details.title;
-      futures.add(
-        telegram.searchVideos(
-          queryTitle,
-          year: widget.details.releaseDate != null
-              ? int.tryParse(widget.details.releaseDate!.split('-').first)
-              : null,
-          mediaType: widget.details.mediaType == MediaType.movie ? 'movie' : 'tv',
-          // Pass language preference so ranking boosts user's chosen language
-          preferLang: filters.hasLanguageFilter ? filters.language.token : null,
-          baseTitle: widget.details.title,
-        ).then((results) => telegram.toQualityOptions(results)),
-      );
-
-      if (futures.isEmpty) {
+    if (choice == _DownloadSourceChoice.telegram) {
+      final telegram = ref.read(telegramServiceProvider);
+      if (!telegram.isLoggedIn) {
         if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
-            content: Text('No sources available. Check Settings → Download Source.'),
+            content: Text('Log in to Telegram in Settings to download'),
             backgroundColor: Colors.orange,
           ),
         );
         return;
       }
 
-      final results = await Future.wait(futures);
-      var allOptions = results.expand((r) => r).toList();
+      final filters = await DownloadFilterSheet.show(
+        context,
+        title: widget.details.title,
+      );
+      if (!mounted || filters == null) return;
 
-      // ── Step 3: Filter results by quality + language
-      if (!filters.isDefault) {
-        final filtered = allOptions.where((q) => filters.matchesOption(
-          quality: q.quality,
-          audioChannels: q.audioChannels,
-        )).toList();
+      setState(() => _loadingDownload = true);
+      try {
+        final hint = filters.searchHint;
+        final queryTitle = hint.isNotEmpty
+            ? '${widget.details.title} $hint'
+            : widget.details.title;
+        final results = await telegram.searchVideos(
+          queryTitle,
+          year: widget.details.releaseDate != null
+              ? int.tryParse(widget.details.releaseDate!.split('-').first)
+              : null,
+          mediaType: 'movie',
+          preferLang: filters.hasLanguageFilter ? filters.language.token : null,
+          baseTitle: widget.details.title,
+        );
+        var allOptions = telegram.toQualityOptions(results);
 
-        if (filtered.isEmpty) {
-          // Nothing matched — warn user and show full list
-          if (mounted) {
+        if (!filters.isDefault) {
+          final filtered = allOptions.where((q) => filters.matchesOption(
+            quality: q.quality,
+            audioChannels: q.audioChannels,
+          )).toList();
+          if (filtered.isNotEmpty) allOptions = filtered;
+        }
+
+        if (!mounted) return;
+        if (allOptions.isEmpty) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('No Telegram download sources found'),
+              backgroundColor: Colors.red,
+            ),
+          );
+          return;
+        }
+
+        await QualityPickerSheet.show(
+          context,
+          options: allOptions,
+          title: widget.details.title,
+          onSelect: (q) {
+            final dl = ref.read(downloadServiceProvider);
+            dl.startDownload(
+              tmdbId: widget.details.id,
+              imdbId: widget.details.imdbId ?? '',
+              title: widget.details.title,
+              mediaType: 'movie',
+              quality: q,
+              posterPath: widget.details.posterPath,
+            );
             ScaffoldMessenger.of(context).showSnackBar(
               SnackBar(
-                content: Text(
-                  'No ${filters.quality != QualityFilter.any ? filters.quality.label : ""}'
-                  '${filters.hasLanguageFilter ? " ${filters.language.label}" : ""} '
-                  'results found — showing all available sources',
-                ),
-                backgroundColor: Colors.orange,
-                duration: const Duration(seconds: 4),
+                content: Text('Downloading ${widget.details.title} via Telegram ⚡'),
+                duration: const Duration(seconds: 3),
                 behavior: SnackBarBehavior.floating,
               ),
             );
-          }
-          // allOptions stays as-is (full list)
-        } else {
-          allOptions = filtered;
-        }
-      }
-
-      if (!mounted) return;
-      if (allOptions.isEmpty) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('No download sources found for this title'),
-            backgroundColor: Colors.red,
-          ),
+          },
         );
-        return;
+      } finally {
+        if (mounted) setState(() => _loadingDownload = false);
       }
-
-      await QualityPickerSheet.show(
-        context,
-        options: allOptions,
-        title: widget.details.title,
-        onSelect: (q) {
-          final dl = ref.read(downloadServiceProvider);
-          dl.startDownload(
-            tmdbId: widget.details.id,
-            imdbId: widget.details.imdbId ?? '',
-            title: widget.details.title,
-            mediaType: 'movie',
-            quality: q,
-            posterPath: widget.details.posterPath,
-          );
+    } else if (choice == _DownloadSourceChoice.vegamovies) {
+      setState(() => _loadingDownload = true);
+      try {
+        final vega = ref.read(vegaMoviesServiceProvider);
+        final results = await vega.getDownloadLinks(
+          title: widget.details.title,
+          year: widget.details.releaseDate != null
+              ? int.tryParse(widget.details.releaseDate!.split('-').first)
+              : null,
+        );
+        if (!mounted) return;
+        if (results.isEmpty) {
           ScaffoldMessenger.of(context).showSnackBar(
-            // ignore: prefer_const_constructors
-            SnackBar(
-              // ignore: prefer_const_constructors
-              content: Text(
-                'Downloading \${widget.details.title} in \${q.quality} via Telegram ⚡',
-              ),
-              duration: const Duration(seconds: 3),
-              behavior: SnackBarBehavior.floating,
+            const SnackBar(
+              content: Text('No VegaMovies direct links found for this title'),
+              backgroundColor: Colors.orange,
             ),
           );
-        },
-      );
-    } finally {
-      if (mounted) setState(() => _loadingDownload = false);
+          return;
+        }
+
+        final allOptions = results.map((link) {
+          return QualityOption(
+            quality: link.quality,
+            hash: link.directUrl, // Store direct URL in hash field
+            sizeBytes: _parseSize(link.sizeLabel),
+            type: link.host,
+            videoCodec: link.codec,
+            audioChannels: link.language,
+            source: 'vegamovies',
+          );
+        }).toList();
+
+        await QualityPickerSheet.show(
+          context,
+          options: allOptions,
+          title: widget.details.title,
+          onSelect: (q) {
+            final dl = ref.read(downloadServiceProvider);
+            dl.startStreamDownload(
+              tmdbId: widget.details.id,
+              imdbId: widget.details.imdbId ?? '',
+              title: widget.details.title,
+              mediaType: 'movie',
+              streamUrl: q.hash, // direct link stored in hash
+              quality: q.quality,
+              posterPath: widget.details.posterPath,
+            );
+            ScaffoldMessenger.of(context).showSnackBar(
+              SnackBar(
+                content: Text('Downloading ${widget.details.title} via VegaMovies 🌐'),
+                duration: const Duration(seconds: 3),
+                behavior: SnackBarBehavior.floating,
+              ),
+            );
+          },
+        );
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('VegaMovies search failed: $e'), backgroundColor: Colors.red),
+          );
+        }
+      } finally {
+        if (mounted) setState(() => _loadingDownload = false);
+      }
+    } else if (choice == _DownloadSourceChoice.torrentio) {
+      setState(() => _loadingDownload = true);
+      try {
+        final torrentio = ref.read(torrentioServiceProvider);
+        final sources = await torrentio.fetchSources(
+          imdbId: widget.details.imdbId ?? '',
+          type: 'movie',
+        );
+        if (!mounted) return;
+        if (sources.isEmpty) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('No Torrentio sources found for this movie'),
+              backgroundColor: Colors.orange,
+            ),
+          );
+          return;
+        }
+
+        final allOptions = sources.map((src) {
+          return QualityOption(
+            quality: src.quality,
+            hash: src.infoHash ?? '',
+            sizeBytes: _parseSize(src.sizeLabel),
+            type: src.provider,
+            videoCodec: src.codec,
+            audioChannels: src.audio,
+            source: 'torrent',
+            seeders: src.seeders,
+          );
+        }).toList();
+
+        await QualityPickerSheet.show(
+          context,
+          options: allOptions,
+          title: widget.details.title,
+          onSelect: (q) async {
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Resolving stream link via Webtor...')),
+            );
+            final directUrl = await ref.read(torrentioServiceProvider).resolveStreamUrl(q.hash);
+            if (directUrl == null) {
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('Could not resolve stream link'), backgroundColor: Colors.red),
+                );
+              }
+              return;
+            }
+            final dl = ref.read(downloadServiceProvider);
+            dl.startStreamDownload(
+              tmdbId: widget.details.id,
+              imdbId: widget.details.imdbId ?? '',
+              title: widget.details.title,
+              mediaType: 'movie',
+              streamUrl: directUrl,
+              quality: q.quality,
+              posterPath: widget.details.posterPath,
+            );
+            if (mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text('Downloading ${widget.details.title} via Torrentio 🔗'),
+                  duration: const Duration(seconds: 3),
+                  behavior: SnackBarBehavior.floating,
+                ),
+              );
+            }
+          },
+        );
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('Torrentio search failed: $e'), backgroundColor: Colors.red),
+          );
+        }
+      } finally {
+        if (mounted) setState(() => _loadingDownload = false);
+      }
     }
   }
 
@@ -639,53 +741,52 @@ class _PlayButtonState extends ConsumerState<_PlayButton> {
     final resumeLabel = hasResume ? _formatDuration(saved.progressSeconds) : null;
     final resumePct = hasResume ? (saved.progressSeconds / saved.totalSeconds).clamp(0.0, 1.0) : 0.0;
 
-    return Focus(
-      autofocus: true,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          // ── Resume progress bar ──
-          if (hasResume) ...[
-            ClipRRect(
-              borderRadius: BorderRadius.circular(4),
-              child: LinearProgressIndicator(
-                value: resumePct,
-                backgroundColor: cs.surfaceContainerHighest,
-                color: cs.primary,
-                minHeight: 3,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // ── Resume progress bar ──
+        if (hasResume) ...[
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: LinearProgressIndicator(
+              value: resumePct,
+              backgroundColor: cs.surfaceContainerHighest,
+              color: cs.primary,
+              minHeight: 3,
+            ),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'Continue from $resumeLabel',
+            style: TextStyle(
+              fontSize: 12,
+              color: cs.onSurfaceVariant,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          const SizedBox(height: 10),
+        ],
+        // ── Buttons row ──
+        Wrap(
+          spacing: 10,
+          runSpacing: 8,
+          children: [
+            ElevatedButton.icon(
+              onPressed: _onPlay,
+              autofocus: true,
+              icon: Icon(hasResume ? Icons.play_arrow_rounded : Icons.play_arrow_rounded, size: 24),
+              label: Text(
+                hasResume ? 'Resume' : (isMovie ? 'Play Movie' : 'Play S01E01'),
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+              ),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: cs.primary,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
               ),
             ),
-            const SizedBox(height: 6),
-            Text(
-              'Continue from $resumeLabel',
-              style: TextStyle(
-                fontSize: 12,
-                color: cs.onSurfaceVariant,
-                fontWeight: FontWeight.w500,
-              ),
-            ),
-            const SizedBox(height: 10),
-          ],
-          // ── Buttons row ──
-          Wrap(
-            spacing: 10,
-            runSpacing: 8,
-            children: [
-              ElevatedButton.icon(
-                onPressed: _onPlay,
-                icon: Icon(hasResume ? Icons.play_arrow_rounded : Icons.play_arrow_rounded, size: 24),
-                label: Text(
-                  hasResume ? 'Resume' : (isMovie ? 'Play Movie' : 'Play S01E01'),
-                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
-                ),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: cs.primary,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-                ),
-              ),
               if (isMovie) ...[
                 Builder(builder: (context) {
                   final String label;
@@ -782,8 +883,7 @@ class _PlayButtonState extends ConsumerState<_PlayButton> {
             ],
           ),
         ],
-      ),
-    );
+      );
   }
 
   String _formatDuration(int seconds) {
@@ -969,36 +1069,61 @@ class _EpisodesSection extends ConsumerWidget {
               itemBuilder: (context, i) {
                 final s = details.seasons[i];
                 final sel = s.seasonNumber == selectedSeason;
+                bool isFocused = false;
                 return Padding(
                   padding: const EdgeInsets.only(right: 8),
-                  child: Focus(
-                    child: GestureDetector(
-                      onTap: () {
-                        ref
-                            .read(selectedSeasonProvider(details.id).notifier)
-                            .state = s.seasonNumber;
-                      },
-                      child: AnimatedContainer(
-                        duration: const Duration(milliseconds: 180),
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 16, vertical: 8),
-                        decoration: BoxDecoration(
-                          gradient: sel ? AtmosTheme.primaryGradient(Theme.of(context).colorScheme) : null,
-                          color: sel ? null : Theme.of(context).colorScheme.surfaceContainerHigh,
-                          borderRadius: BorderRadius.circular(20),
-                        ),
-                        child: Text(
-                          s.name,
-                          style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
-                            color: sel
-                                ? Theme.of(context).colorScheme.onSurface
-                                : Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
+                  child: StatefulBuilder(
+                    builder: (context, setState) {
+                      return Focus(
+                        onFocusChange: (focused) => setState(() => isFocused = focused),
+                        onKeyEvent: (node, event) {
+                          if (event is KeyDownEvent &&
+                              (event.logicalKey == LogicalKeyboardKey.enter ||
+                                  event.logicalKey == LogicalKeyboardKey.select)) {
+                            ref
+                                .read(selectedSeasonProvider(details.id).notifier)
+                                .state = s.seasonNumber;
+                            return KeyEventResult.handled;
+                          }
+                          return KeyEventResult.ignored;
+                        },
+                        child: GestureDetector(
+                          onTap: () {
+                            ref
+                                .read(selectedSeasonProvider(details.id).notifier)
+                                .state = s.seasonNumber;
+                          },
+                          child: AnimatedContainer(
+                            duration: const Duration(milliseconds: 180),
+                            transform: Matrix4.identity()..scale(isFocused ? 1.06 : 1.0),
+                            transformAlignment: Alignment.center,
+                            padding: const EdgeInsets.symmetric(
+                                horizontal: 16, vertical: 8),
+                            decoration: BoxDecoration(
+                              gradient: sel ? AtmosTheme.primaryGradient(Theme.of(context).colorScheme) : null,
+                              color: sel ? null : Theme.of(context).colorScheme.surfaceContainerHigh,
+                              borderRadius: BorderRadius.circular(20),
+                              border: Border.all(
+                                color: isFocused
+                                    ? Theme.of(context).colorScheme.primary
+                                    : Colors.transparent,
+                                width: 2,
+                              ),
+                            ),
+                            child: Text(
+                              s.name,
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: sel
+                                    ? Theme.of(context).colorScheme.onSurface
+                                    : Theme.of(context).colorScheme.onSurfaceVariant.withValues(alpha: 0.7),
+                              ),
+                            ),
                           ),
                         ),
-                      ),
-                    ),
+                      );
+                    },
                   ),
                 );
               },
@@ -1054,82 +1179,164 @@ class _EpisodesSection extends ConsumerWidget {
                     });
                   },
                   onDownload: () async {
-                    final filters = await DownloadFilterSheet.show(
-                      context,
-                      title: '${details.title} S${selectedSeason.toString().padLeft(2, '0')}E${ep.episodeNumber.toString().padLeft(2, '0')}',
-                    );
-                    if (!context.mounted || filters == null) return;
+                    final choice = await _DownloadSourcePickerSheet.show(context, details: details);
+                    if (!context.mounted || choice == null) return;
 
-                    final telegram = ref.read(telegramServiceProvider);
-                    if (!telegram.isLoggedIn) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('Log in to Telegram in Settings to download')),
+                    final titleString = '${details.title} S${selectedSeason.toString().padLeft(2, "0")}E${ep.episodeNumber.toString().padLeft(2, "0")}';
+
+                    if (choice == _DownloadSourceChoice.telegram) {
+                      final telegram = ref.read(telegramServiceProvider);
+                      if (!telegram.isLoggedIn) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(content: Text('Log in to Telegram in Settings to download')),
+                        );
+                        return;
+                      }
+
+                      final filters = await DownloadFilterSheet.show(
+                        context,
+                        title: titleString,
                       );
-                      return;
-                    }
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      SnackBar(content: Text('Searching S${selectedSeason.toString().padLeft(2, "0")}E${ep.episodeNumber.toString().padLeft(2, "0")}...')),
-                    );
+                      if (!context.mounted || filters == null) return;
 
-                    final futures = <Future<List<QualityOption>>>[];
-                    final hint = filters.searchHint;
-                    final queryTitle = hint.isNotEmpty ? '${details.title} $hint' : details.title;
-                    futures.add(
-                      telegram.searchVideos(
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('Searching Telegram for S${selectedSeason.toString().padLeft(2, "0")}E${ep.episodeNumber.toString().padLeft(2, "0")}...')),
+                      );
+
+                      final hint = filters.searchHint;
+                      final queryTitle = hint.isNotEmpty ? '${details.title} $hint' : details.title;
+                      final results = await telegram.searchVideos(
                         queryTitle,
                         mediaType: 'tv',
                         season: selectedSeason,
                         episode: ep.episodeNumber,
                         preferLang: filters.hasLanguageFilter ? filters.language.token : null,
                         baseTitle: details.title,
-                      ).then((r) => telegram.toQualityOptions(r)),
-                    );
+                      );
+                      var allOptions = telegram.toQualityOptions(results);
 
-                    if (futures.isEmpty) {
+                      if (!filters.isDefault) {
+                        final filtered = allOptions.where((q) => filters.matchesOption(
+                          quality: q.quality, audioChannels: q.audioChannels)).toList();
+                        if (filtered.isNotEmpty) allOptions = filtered;
+                      }
+
                       if (!context.mounted) return;
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('No sources available'), backgroundColor: Colors.orange),
-                      );
-                      return;
-                    }
-
-                    final results = await Future.wait(futures);
-                    var allOptions = results.expand((r) => r).toList();
-
-                    if (!filters.isDefault) {
-                      final filtered = allOptions.where((q) => filters.matchesOption(
-                        quality: q.quality, audioChannels: q.audioChannels)).toList();
-                      if (filtered.isNotEmpty) allOptions = filtered;
-                    }
-
-                    if (!context.mounted) return;
-                    if (allOptions.isEmpty) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('No sources found'), backgroundColor: Colors.red),
-                      );
-                      return;
-                    }
-                    await QualityPickerSheet.show(
-                      context,
-                      options: allOptions,
-                      title: '${details.title} S${selectedSeason.toString().padLeft(2, "0")}E${ep.episodeNumber.toString().padLeft(2, "0")}',
-                      onSelect: (q) {
-                        ref.read(downloadServiceProvider).startDownload(
-                          tmdbId: details.id, imdbId: details.imdbId ?? '', title: details.title,
-                          mediaType: 'tv', quality: q, season: selectedSeason,
-                          episode: ep.episodeNumber, episodeName: ep.name,
-                          posterPath: details.posterPath,
-                        );
+                      if (allOptions.isEmpty) {
                         ScaffoldMessenger.of(context).showSnackBar(
-                          SnackBar(
-                            content: Text('Downloading ${ep.name} in ${q.quality}'
-                                '${q.source == "telegram" ? " via Telegram ⚡" : " via Torrent 🔗"}'),
-                            duration: const Duration(seconds: 3),
-                            behavior: SnackBarBehavior.floating,
-                          ),
+                          const SnackBar(content: Text('No Telegram download sources found'), backgroundColor: Colors.red),
                         );
-                      },
-                    );
+                        return;
+                      }
+
+                      await QualityPickerSheet.show(
+                        context,
+                        options: allOptions,
+                        title: titleString,
+                        onSelect: (q) {
+                          ref.read(downloadServiceProvider).startDownload(
+                            tmdbId: details.id, imdbId: details.imdbId ?? '', title: details.title,
+                            mediaType: 'tv', quality: q, season: selectedSeason,
+                            episode: ep.episodeNumber, episodeName: ep.name,
+                            posterPath: details.posterPath,
+                          );
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(
+                              content: Text('Downloading ${ep.name} in ${q.quality} via Telegram ⚡'),
+                              duration: const Duration(seconds: 3),
+                              behavior: SnackBarBehavior.floating,
+                            ),
+                          );
+                        },
+                      );
+                    } else if (choice == _DownloadSourceChoice.torrentio) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(content: Text('Searching Torrentio for S${selectedSeason.toString().padLeft(2, "0")}E${ep.episodeNumber.toString().padLeft(2, "0")}...')),
+                      );
+
+                      try {
+                        final torrentio = ref.read(torrentioServiceProvider);
+                        final sources = await torrentio.fetchSources(
+                          imdbId: details.imdbId ?? '',
+                          type: 'tv',
+                          season: selectedSeason,
+                          episode: ep.episodeNumber,
+                        );
+
+                        if (!context.mounted) return;
+                        if (sources.isEmpty) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('No Torrentio sources found for this episode'), backgroundColor: Colors.orange),
+                          );
+                          return;
+                        }
+
+                        final allOptions = sources.map((src) {
+                          return QualityOption(
+                            quality: src.quality,
+                            hash: src.infoHash ?? '',
+                            sizeBytes: _parseSize(src.sizeLabel),
+                            type: src.provider,
+                            videoCodec: src.codec,
+                            audioChannels: src.audio,
+                            source: 'torrent',
+                            seeders: src.seeders,
+                          );
+                        }).toList();
+
+                        await QualityPickerSheet.show(
+                          context,
+                          options: allOptions,
+                          title: titleString,
+                          onSelect: (q) async {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('Resolving stream link via Webtor...')),
+                            );
+                            final directUrl = await ref.read(torrentioServiceProvider).resolveStreamUrl(q.hash);
+                            if (directUrl == null) {
+                              if (context.mounted) {
+                                ScaffoldMessenger.of(context).showSnackBar(
+                                  const SnackBar(content: Text('Could not resolve stream link'), backgroundColor: Colors.red),
+                                );
+                              }
+                              return;
+                            }
+                            final dl = ref.read(downloadServiceProvider);
+                            dl.startStreamDownload(
+                              tmdbId: details.id,
+                              imdbId: details.imdbId ?? '',
+                              title: details.title,
+                              mediaType: 'tv',
+                              streamUrl: directUrl,
+                              quality: q.quality,
+                              season: selectedSeason,
+                              episode: ep.episodeNumber,
+                              episodeName: ep.name,
+                              posterPath: details.posterPath,
+                            );
+                            if (context.mounted) {
+                              ScaffoldMessenger.of(context).showSnackBar(
+                                SnackBar(
+                                  content: Text('Downloading ${ep.name} in ${q.quality} via Torrentio 🔗'),
+                                  duration: const Duration(seconds: 3),
+                                  behavior: SnackBarBehavior.floating,
+                                ),
+                              );
+                            }
+                          },
+                        );
+                      } catch (e) {
+                        if (context.mounted) {
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            SnackBar(content: Text('Torrentio search failed: $e'), backgroundColor: Colors.red),
+                          );
+                        }
+                      }
+                    } else if (choice == _DownloadSourceChoice.vegamovies) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('VegaMovies does not support individual episode downloads'), backgroundColor: Colors.orange),
+                      );
+                    }
                   },
                 );
               }).toList(),
@@ -1160,6 +1367,7 @@ class _DownloadSeasonButton extends ConsumerStatefulWidget {
 
 class _DownloadSeasonButtonState extends ConsumerState<_DownloadSeasonButton> {
   bool _loading = false;
+  bool _isFocused = false;
 
   @override
   Widget build(BuildContext context) {
@@ -1181,13 +1389,17 @@ class _DownloadSeasonButtonState extends ConsumerState<_DownloadSeasonButton> {
               child: InkWell(
                 borderRadius: BorderRadius.circular(20),
                 onTap: _onTap,
-                child: Container(
+                onFocusChange: (focused) => setState(() => _isFocused = focused),
+                child: AnimatedContainer(
+                  duration: const Duration(milliseconds: 180),
                   padding:
                       const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   decoration: BoxDecoration(
                     borderRadius: BorderRadius.circular(20),
+                    color: _isFocused ? cs.primary.withValues(alpha: 0.15) : Colors.transparent,
                     border: Border.all(
-                      color: cs.primary.withValues(alpha: 0.5),
+                      color: _isFocused ? cs.primary : cs.primary.withValues(alpha: 0.5),
+                      width: _isFocused ? 2.0 : 1.0,
                     ),
                   ),
                   child: Row(
@@ -1318,4 +1530,237 @@ class _DownloadSeasonButtonState extends ConsumerState<_DownloadSeasonButton> {
 
 // All playback now routes to /native-player directly.
 // The old _PlayerModeSheet and _ModeCard classes were removed.
+
+enum _DownloadSourceChoice {
+  telegram,
+  vegamovies,
+  torrentio,
+}
+
+class _DownloadSourcePickerSheet extends ConsumerWidget {
+  final TmdbDetails details;
+  final bool isMovie;
+
+  const _DownloadSourcePickerSheet({
+    required this.details,
+    required this.isMovie,
+  });
+
+  static Future<_DownloadSourceChoice?> show(
+    BuildContext context, {
+    required TmdbDetails details,
+  }) {
+    final isMovie = details.mediaType == MediaType.movie;
+    return showModalBottomSheet<_DownloadSourceChoice>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (_) => _DownloadSourcePickerSheet(
+        details: details,
+        isMovie: isMovie,
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final cs = Theme.of(context).colorScheme;
+    final telegram = ref.watch(telegramServiceProvider);
+
+    return Container(
+      decoration: const BoxDecoration(
+        color: Color(0xFF12121E),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      padding: EdgeInsets.only(
+        left: AppSpacing.lg,
+        right: AppSpacing.lg,
+        top: AppSpacing.md,
+        bottom: MediaQuery.of(context).viewInsets.bottom + AppSpacing.xl,
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Handle
+          Center(
+            child: Container(
+              width: 40,
+              height: 4,
+              margin: const EdgeInsets.symmetric(vertical: 12),
+              decoration: BoxDecoration(
+                color: Colors.white24,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(8, 4, 8, 16),
+            child: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(8),
+                  decoration: BoxDecoration(
+                    color: cs.primary.withValues(alpha: 0.15),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Icon(Icons.download_rounded, color: cs.primary, size: 20),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text(
+                        'Select Download Source',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.w700,
+                          fontSize: 16,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        details.title,
+                        style: TextStyle(
+                          color: cs.onSurfaceVariant.withValues(alpha: 0.7),
+                          fontSize: 12,
+                        ),
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const Divider(color: Colors.white10, height: 1),
+          const SizedBox(height: AppSpacing.md),
+          
+          // Option 1: Telegram CDN
+          _buildSourceOption(
+            context,
+            icon: Icons.telegram,
+            iconColor: const Color(0xFF2AABEE),
+            title: 'Telegram CDN (Fastest)',
+            subtitle: telegram.isLoggedIn
+                ? 'Direct high-speed download (requires account)'
+                : 'Requires Telegram Login (Configure in Settings)',
+            choice: _DownloadSourceChoice.telegram,
+          ),
+          const SizedBox(height: AppSpacing.md),
+
+          // Option 2: VegaMovies Direct DDL (only for Movies)
+          if (isMovie) ...[
+            _buildSourceOption(
+              context,
+              icon: Icons.cloud_download_rounded,
+              iconColor: Colors.orange,
+              title: 'VegaMovies Direct (No Login)',
+              subtitle: 'Direct web download (Google Drive, PixelDrain, etc.)',
+              choice: _DownloadSourceChoice.vegamovies,
+            ),
+            const SizedBox(height: AppSpacing.md),
+          ],
+
+          // Option 3: Torrentio / Stremio Cache (No Login)
+          _buildSourceOption(
+            context,
+            icon: Icons.link_rounded,
+            iconColor: Colors.purple,
+            title: 'Torrentio Cache / Direct (No Login)',
+            subtitle: 'Stream cached HTTP links directly via Webtor',
+            choice: _DownloadSourceChoice.torrentio,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSourceOption(
+    BuildContext context, {
+    required IconData icon,
+    required Color iconColor,
+    required String title,
+    required String subtitle,
+    required _DownloadSourceChoice choice,
+  }) {
+    final cs = Theme.of(context).colorScheme;
+    bool isFocused = false;
+    return StatefulBuilder(
+      builder: (context, setState) {
+        return InkWell(
+          onTap: () => Navigator.pop(context, choice),
+          onFocusChange: (focused) => setState(() => isFocused = focused),
+          borderRadius: BorderRadius.circular(16),
+          child: AnimatedContainer(
+            duration: const Duration(milliseconds: 180),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+            decoration: BoxDecoration(
+              color: isFocused
+                  ? cs.primary.withValues(alpha: 0.15)
+                  : Theme.of(context).colorScheme.surfaceContainerHigh.withValues(alpha: 0.3),
+              borderRadius: BorderRadius.circular(16),
+              border: Border.all(
+                color: isFocused ? cs.primary : cs.outlineVariant.withValues(alpha: 0.5),
+                width: 2,
+              ),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: iconColor.withValues(alpha: 0.15),
+                    shape: BoxShape.circle,
+                  ),
+                  child: Icon(icon, color: iconColor, size: 24),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        title,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 14,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        subtitle,
+                        style: TextStyle(
+                          color: cs.onSurfaceVariant.withValues(alpha: 0.7),
+                          fontSize: 12,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                Icon(Icons.chevron_right_rounded, color: cs.outline),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+int _parseSize(String? sizeLabel) {
+  if (sizeLabel == null || sizeLabel.isEmpty) return 0;
+  final match = RegExp(r'(\d+\.?\d*)\s*(GB|MB)', caseSensitive: false).firstMatch(sizeLabel);
+  if (match == null) return 0;
+  final value = double.tryParse(match.group(1)!) ?? 0.0;
+  final unit = match.group(2)!.toUpperCase();
+  if (unit == 'GB') {
+    return (value * 1024 * 1024 * 1024).toInt();
+  } else {
+    return (value * 1024 * 1024).toInt();
+  }
+}
+
 

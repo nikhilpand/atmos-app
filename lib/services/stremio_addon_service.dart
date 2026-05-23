@@ -93,12 +93,7 @@ class StremioAddon {
 // ─── Pre-configured Free Addons ──────────────────────────────────────────────
 
 /// Free Stremio addons — no debrid, no API key needed
-const kFreeStremioAddons = <StremioAddon>[
-  StremioAddon(
-    name: 'MediaFusion',
-    baseUrl: 'https://mediafusion.elfhosted.com',
-  ),
-];
+const kFreeStremioAddons = <StremioAddon>[];
 
 // ─── Service ─────────────────────────────────────────────────────────────────
 

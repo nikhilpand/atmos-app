@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 import 'stream_extractor_service.dart';
 
 /// Consumet API Service for high-speed dedicated Anime streams.
@@ -13,13 +14,14 @@ class ConsumetService {
   static const _ua = 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36';
   static const _timeout = Duration(seconds: 7);
 
-  // List of public Consumet instances to try in parallel
-  static const _baseUrls = [
-    'https://api.consumet.org',
-    'https://consumet-api-clone.vercel.app',
-    'https://consumet-api-nine.vercel.app',
-    'https://c.delusionz.xyz',
-  ];
+  // Use HuggingFace Space backend as the single base URL
+  List<String> get _baseUrls {
+    final envUrl = dotenv.env['HF_SPACE_URL'] ?? '';
+    final hfUrl = envUrl.isNotEmpty
+        ? (envUrl.endsWith('/') ? envUrl.substring(0, envUrl.length - 1) : envUrl)
+        : 'https://nikhil1776-torrentindex.hf.space';
+    return [hfUrl];
+  }
 
   /// Resolves direct stream sources for an anime title and episode.
   /// Fires ALL base URLs × providers in parallel and returns the first success.

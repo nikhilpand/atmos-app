@@ -245,7 +245,7 @@ class TorrentioService {
   }) async {
     if (infoHash.isEmpty) return null;
 
-    // Webtor CDN mirrors — try each until one works
+    // Webtor CDN mirrors — try each in parallel
     const mirrors = [
       'https://dq4w8c.webtor.io',
       'https://hx22fl.webtor.io',
@@ -258,46 +258,52 @@ class TorrentioService {
         '&tr=udp%3A%2F%2Ftracker.torrent.eu.org%3A451%2Fannounce';
 
     final magnetUrl = 'magnet:?xt=urn:btih:$infoHash$trackers';
+    final encodedMagnet = Uri.encodeComponent(magnetUrl);
 
-    for (final mirror in mirrors) {
-      try {
-        // Strategy 1: Direct stream URL with magnet
-        final encodedMagnet = Uri.encodeComponent(magnetUrl);
-        final streamUrl = '$mirror/stream?magnet=$encodedMagnet&file_index=$fileIdx';
+    // Query all mirrors in parallel to minimize waiting time (Webtor can take time to respond on cold torrents)
+    final results = await Future.wait(
+      mirrors.map((mirror) async {
+        try {
+          final streamUrl = '$mirror/stream?magnet=$encodedMagnet&file_index=$fileIdx';
 
-        // Validate the URL actually responds before returning
-        final headRes = await http.head(
-          Uri.parse(streamUrl),
-          headers: {'User-Agent': _ua, 'Range': 'bytes=0-0'},
-        ).timeout(const Duration(seconds: 6));
+          // Validate via HTTP HEAD with a shorter 4-second timeout
+          final headRes = await http.head(
+            Uri.parse(streamUrl),
+            headers: {'User-Agent': _ua, 'Range': 'bytes=0-0'},
+          ).timeout(const Duration(seconds: 4));
 
-        if (headRes.statusCode == 200 || headRes.statusCode == 206) {
-          debugPrint('[Webtor] ✅ Stream validated via $mirror');
-          return streamUrl;
-        }
-
-        // Strategy 2: Try embed page and parse actual video src
-        final embedUrl = '$mirror/embed/$infoHash';
-        final embedRes = await http.get(
-          Uri.parse(embedUrl),
-          headers: {'User-Agent': _ua},
-        ).timeout(const Duration(seconds: 6));
-
-        if (embedRes.statusCode == 200) {
-          // Parse video source from the embed page
-          final srcMatch = RegExp(r'(https?://[^\s"<>]+(?:\.mp4|\.mkv|\.avi|/stream)[^\s"<>]*)').firstMatch(embedRes.body);
-          if (srcMatch != null) {
-            debugPrint('[Webtor] ✅ Stream extracted from embed page via $mirror');
-            return srcMatch.group(1);
+          if (headRes.statusCode == 200 || headRes.statusCode == 206) {
+            debugPrint('[Webtor] ✅ Stream validated via $mirror');
+            return streamUrl;
           }
-        }
-      } catch (e) {
-        debugPrint('[Webtor] Mirror $mirror failed: $e');
-      }
+
+          // Fallback Strategy: check embed source
+          final embedUrl = '$mirror/embed/$infoHash';
+          final embedRes = await http.get(
+            Uri.parse(embedUrl),
+            headers: {'User-Agent': _ua},
+          ).timeout(const Duration(seconds: 4));
+
+          if (embedRes.statusCode == 200) {
+            final srcMatch = RegExp(r'(https?://[^\s"<>]+(?:\.mp4|\.mkv|\.avi|/stream)[^\s"<>]*)')
+                .firstMatch(embedRes.body);
+            if (srcMatch != null) {
+              debugPrint('[Webtor] ✅ Stream extracted from embed page via $mirror');
+              return srcMatch.group(1);
+            }
+          }
+        } catch (_) {}
+        return null;
+      }),
+    );
+
+    // Use the first resolved valid URL
+    for (final url in results) {
+      if (url != null) return url;
     }
 
     // Final fallback: construct URL with first mirror (may need seeding time)
-    final fallbackUrl = '${mirrors[0]}/stream?magnet=${Uri.encodeComponent(magnetUrl)}&file_index=$fileIdx';
+    final fallbackUrl = '${mirrors[0]}/stream?magnet=$encodedMagnet&file_index=$fileIdx';
     debugPrint('[Webtor] ⚠️ Using unvalidated fallback URL');
     return fallbackUrl;
   }

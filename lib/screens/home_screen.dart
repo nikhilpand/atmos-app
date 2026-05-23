@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:go_router/go_router.dart';
@@ -421,37 +422,59 @@ class _GenrePillRow extends ConsumerWidget {
             itemCount: genres.length,
             itemBuilder: (ctx, i) {
               final entry = genres.entries.elementAt(i);
-              return Focus(
-                child: GestureDetector(
-                  onTap: () => onTap(entry.key, entry.value.name, entry.value.emoji, type),
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        colors: [
-                          cs.primaryContainer,
-                          cs.secondaryContainer,
-                        ],
-                      ),
-                      borderRadius: BorderRadius.circular(AppRadius.full),
+              bool isFocused = false;
+              return StatefulBuilder(
+                builder: (context, setState) {
+                  return Focus(
+                    onFocusChange: (v) => setState(() => isFocused = v),
+                    onKeyEvent: (node, event) {
+                      if (event is KeyDownEvent &&
+                          (event.logicalKey == LogicalKeyboardKey.enter ||
+                              event.logicalKey == LogicalKeyboardKey.select)) {
+                        onTap(entry.key, entry.value.name, entry.value.emoji, type);
+                        return KeyEventResult.handled;
+                      }
+                      return KeyEventResult.ignored;
+                    },
+                    child: GestureDetector(
+                      onTap: () => onTap(entry.key, entry.value.name, entry.value.emoji, type),
+                      child: AnimatedContainer(
+                        duration: const Duration(milliseconds: 180),
+                        transform: Matrix4.identity()..scale(isFocused ? 1.06 : 1.0),
+                        transformAlignment: Alignment.center,
+                        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            colors: [
+                              cs.primaryContainer,
+                              cs.secondaryContainer,
+                            ],
+                          ),
+                          borderRadius: BorderRadius.circular(AppRadius.full),
+                          border: Border.all(
+                            color: isFocused ? cs.primary : Colors.transparent,
+                            width: 2,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Text(entry.value.emoji, style: const TextStyle(fontSize: 14)),
+                            const SizedBox(width: 6),
+                            Text(entry.value.name,
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: cs.onPrimaryContainer,
+                              )),
+                          ],
+                        ),
+                      ).animate(delay: Duration(milliseconds: i * 30))
+                        .fadeIn(duration: 300.ms)
+                        .slideX(begin: 0.2, end: 0, duration: 300.ms),
                     ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(entry.value.emoji, style: const TextStyle(fontSize: 14)),
-                        const SizedBox(width: 6),
-                        Text(entry.value.name,
-                          style: TextStyle(
-                            fontSize: 13,
-                            fontWeight: FontWeight.w600,
-                            color: cs.onPrimaryContainer,
-                          )),
-                      ],
-                    ),
-                  ).animate(delay: Duration(milliseconds: i * 30))
-                    .fadeIn(duration: 300.ms)
-                    .slideX(begin: 0.2, end: 0, duration: 300.ms),
-                ),
+                  );
+                },
               );
             },
           ),
@@ -478,32 +501,51 @@ class _FilterChips extends ConsumerWidget {
     return Row(
       children: filters.map((f) {
         final selected = current == f.$1;
+        bool isFocused = false;
         return Padding(
           padding: const EdgeInsets.only(left: AppSpacing.sm),
-          child: Focus(
-            child: GestureDetector(
-              onTap: () => ref.read(contentFilterProvider.notifier).state = f.$1,
-              child: AnimatedContainer(
-                duration: const Duration(milliseconds: 200),
-                padding: EdgeInsets.symmetric(
-                  horizontal: context.isExpanded ? 16 : 12,
-                  vertical: context.isExpanded ? 8 : 6,
-                ),
-                decoration: BoxDecoration(
-                  color: selected ? cs.primaryContainer : cs.surfaceContainerHigh,
-                  borderRadius: BorderRadius.circular(AppRadius.full),
-                  border: Border.all(
-                    color: selected ? cs.primary : Colors.transparent,
-                    width: 1.5,
+          child: StatefulBuilder(
+            builder: (context, setState) {
+              return Focus(
+                onFocusChange: (v) => setState(() => isFocused = v),
+                onKeyEvent: (node, event) {
+                  if (event is KeyDownEvent &&
+                      (event.logicalKey == LogicalKeyboardKey.enter ||
+                          event.logicalKey == LogicalKeyboardKey.select)) {
+                    ref.read(contentFilterProvider.notifier).state = f.$1;
+                    return KeyEventResult.handled;
+                  }
+                  return KeyEventResult.ignored;
+                },
+                child: GestureDetector(
+                  onTap: () => ref.read(contentFilterProvider.notifier).state = f.$1,
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    transform: Matrix4.identity()..scale(isFocused ? 1.06 : 1.0),
+                    transformAlignment: Alignment.center,
+                    padding: EdgeInsets.symmetric(
+                      horizontal: context.isExpanded ? 16 : 12,
+                      vertical: context.isExpanded ? 8 : 6,
+                    ),
+                    decoration: BoxDecoration(
+                      color: selected ? cs.primaryContainer : cs.surfaceContainerHigh,
+                      borderRadius: BorderRadius.circular(AppRadius.full),
+                      border: Border.all(
+                        color: isFocused
+                            ? cs.primary
+                            : (selected ? cs.primary.withValues(alpha: 0.5) : Colors.transparent),
+                        width: 2,
+                      ),
+                    ),
+                    child: Text(f.$2,
+                      style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                        color: selected ? cs.onPrimaryContainer : cs.onSurfaceVariant,
+                        fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
+                      )),
                   ),
                 ),
-                child: Text(f.$2,
-                  style: Theme.of(context).textTheme.labelSmall?.copyWith(
-                    color: selected ? cs.onPrimaryContainer : cs.onSurfaceVariant,
-                    fontWeight: selected ? FontWeight.w700 : FontWeight.w500,
-                  )),
-              ),
-            ),
+              );
+            },
           ),
         );
       }).toList(),
@@ -618,21 +660,17 @@ class _HeroBanner extends StatelessWidget {
                 const SizedBox(height: AppSpacing.lg),
                 Row(
                   children: [
-                    Focus(
+                    FilledButton.icon(
                       autofocus: true,
-                      child: FilledButton.icon(
-                        onPressed: onPlay,
-                        icon: const Icon(Icons.play_arrow_rounded, size: 22),
-                        label: Text(media.mediaType == MediaType.movie ? 'Watch Now' : 'Episodes'),
-                      ),
+                      onPressed: onPlay,
+                      icon: const Icon(Icons.play_arrow_rounded, size: 22),
+                      label: Text(media.mediaType == MediaType.movie ? 'Watch Now' : 'Episodes'),
                     ),
                     const SizedBox(width: AppSpacing.sm),
-                    Focus(
-                      child: OutlinedButton.icon(
-                        onPressed: onChangeHero,
-                        icon: const Icon(Icons.refresh_rounded, size: 18),
-                        label: const Text('Next'),
-                      ),
+                    OutlinedButton.icon(
+                      onPressed: onChangeHero,
+                      icon: const Icon(Icons.refresh_rounded, size: 18),
+                      label: const Text('Next'),
                     ),
                   ],
                 ),

@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:volume_controller/volume_controller.dart';
 import 'package:go_router/go_router.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
+import 'package:url_launcher/url_launcher.dart';
 import '../services/stream_extractor_service.dart';
 import '../services/subtitle_service.dart' as opensubs;
 import '../providers/providers.dart';
@@ -664,8 +665,123 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
     });
   }
 
+  void _showTurnstileWarning(ExtractedStream stream) {
+    if (!mounted) return;
+    setState(() {
+      _state = _ExState.failed;
+      _failedMsg = 'Verification Required (Cloudflare Turnstile CAPTCHA)';
+    });
+
+    showDialog(
+      context: context,
+      barrierDismissible: true,
+      builder: (context) {
+        return BackdropFilter(
+          filter: ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+          child: AlertDialog(
+            backgroundColor: Colors.black.withValues(alpha: 0.8),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(20),
+              side: const BorderSide(color: Colors.white10),
+            ),
+            title: const Row(
+              children: [
+                Icon(Icons.warning_amber_rounded, color: Colors.amber, size: 28),
+                SizedBox(width: 10),
+                Text(
+                  'Verification Required',
+                  style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+                ),
+              ],
+            ),
+            content: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  'This stream URL is protected by a Cloudflare Turnstile CAPTCHA. To play this stream, you must solve the verification in your browser first.',
+                  style: TextStyle(color: Colors.white70, fontSize: 14, height: 1.4),
+                ),
+                const SizedBox(height: 12),
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.white.withValues(alpha: 0.05),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: Colors.white10),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.link, color: Colors.blueAccent, size: 20),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          stream.url,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            color: Colors.blueAccent,
+                            fontSize: 12,
+                            decoration: TextDecoration.underline,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  'Once verified in your browser, return to the app and retry, or switch to another source.',
+                  style: TextStyle(color: Colors.white54, fontSize: 12, fontStyle: FontStyle.italic),
+                ),
+              ],
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('Cancel', style: TextStyle(color: Colors.white38)),
+              ),
+              ElevatedButton.icon(
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.blueAccent,
+                  foregroundColor: Colors.white,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                ),
+                icon: const Icon(Icons.open_in_browser, size: 18),
+                label: const Text('Open Browser', style: TextStyle(fontWeight: FontWeight.bold)),
+                onPressed: () async {
+                  Navigator.pop(context);
+                  final uri = Uri.parse(stream.url);
+                  if (await canLaunchUrl(uri)) {
+                    await launchUrl(uri, mode: LaunchMode.externalApplication);
+                  } else {
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('Could not open browser for this URL.')),
+                      );
+                    }
+                  }
+                },
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   void _playStream(ExtractedStream stream, {Duration? resumeFrom}) async {
     _skipCaching = false;
+
+    final urlLower = stream.url.toLowerCase();
+    if (urlLower.contains('vgmlinks.app') ||
+        urlLower.contains('nexdrive.bet') ||
+        urlLower.contains('fast-dl.org')) {
+      _showTurnstileWarning(stream);
+      return;
+    }
 
     if (stream.magnetUrl != null) {
       final cacheService = ref.read(torrentCacheServiceProvider);
@@ -751,6 +867,25 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
       // Reset quality badge on every server switch so it reflects the new provider
       _activeQuality = stream.hasQualities ? stream.qualities.first.quality : '';
     });
+
+    // Set User-Agent and Referer globally in mpv properties to ensure segment requests use them
+    final platform = _player.platform;
+    if (platform is NativePlayer) {
+      try {
+        final ua = stream.headers['User-Agent'] ?? stream.headers['user-agent'] ?? '';
+        final referer = stream.headers['Referer'] ?? stream.headers['referer'] ?? '';
+        if (ua.isNotEmpty) {
+          await platform.setProperty('user-agent', ua);
+          debugPrint('[Player] Set mpv user-agent: $ua');
+        }
+        if (referer.isNotEmpty) {
+          await platform.setProperty('referrer', referer);
+          debugPrint('[Player] Set mpv referrer: $referer');
+        }
+      } catch (e) {
+        debugPrint('[Player] Failed setting HTTP properties on native player: $e');
+      }
+    }
 
     await _player.open(Media(
       stream.url,
@@ -931,15 +1066,15 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
       final platform = _player.platform;
       if (platform is NativePlayer) {
         await platform.setProperty('cache', 'yes');
-        await platform.setProperty('demuxer-max-bytes', '67108864'); // 64 MB
-        await platform.setProperty('demuxer-max-back-bytes', '33554432'); // 32 MB
-        await platform.setProperty('cache-secs', '60');
-        await platform.setProperty('demuxer-readahead-secs', '60');
-        await platform.setProperty('hwdec', 'auto-safe');
-        await platform.setProperty('network-timeout', '10');
+        await platform.setProperty('demuxer-max-bytes', '134217728'); // 128 MB buffer size
+        await platform.setProperty('demuxer-max-back-bytes', '67108864'); // 64 MB seek-back buffer
+        await platform.setProperty('cache-secs', '180'); // 3 minutes buffer
+        await platform.setProperty('demuxer-readahead-secs', '180'); // 3 minutes read-ahead
+        await platform.setProperty('hwdec', 'mediacodec-copy'); // Android MediaCodec hardware acceleration
+        await platform.setProperty('network-timeout', '30'); // 30 seconds network timeout
         await platform.setProperty('demuxer-lavf-probesize', '5000000');
         await platform.setProperty('demuxer-lavf-analyzeduration', '5000000');
-        debugPrint('[Player] Configured optimal cache & streaming properties');
+        debugPrint('[Player] Configured optimal cache, buffer & mediacodec properties');
       }
     } catch (e) {
       debugPrint('[Player] Failed to set MPV properties: $e');

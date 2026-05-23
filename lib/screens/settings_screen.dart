@@ -63,6 +63,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       _version           = version;
       _geminiApiKey      = prefs.getString('custom_gemini_api_key') ?? '';
     });
+    ref.read(downloadSourceProvider.notifier).state = _downloadSource;
   }
 
   Future<void> _save() async {
@@ -78,6 +79,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
       prefs.setBool('app_save_history', _saveHistory),
       prefs.setString('dl_source', _downloadSource.name),
     ]);
+    ref.read(downloadSourceProvider.notifier).state = _downloadSource;
     // ← H3: notify DownloadService immediately so settings take effect
     ref.read(downloadServiceProvider).reloadSettings();
   }
@@ -123,6 +125,27 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               trailing: _QualityDropdown(
                 value: _downloadQuality,
                 onChanged: (v) { setState(() => _downloadQuality = v!); _save(); },
+              ),
+            ),
+            _SettingTile(
+              icon: Icons.source_rounded,
+              title: 'Download Source',
+              subtitle: 'Select preferred download engine',
+              trailing: DropdownButton<DownloadSource>(
+                value: _downloadSource,
+                underline: const SizedBox(),
+                borderRadius: BorderRadius.circular(12),
+                dropdownColor: cs.surfaceContainerHigh,
+                items: DownloadSource.values.map((src) => DropdownMenuItem(
+                  value: src,
+                  child: Text('${src.icon} ${src.label}', style: const TextStyle(fontSize: 14)),
+                )).toList(),
+                onChanged: (v) {
+                  if (v != null) {
+                    setState(() => _downloadSource = v);
+                    _save();
+                  }
+                },
               ),
             ),
             _SettingTile(

@@ -133,7 +133,10 @@ class VegaMoviesService {
   static const _ua = 'Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36';
 
   VegaMoviesService() {
-    _workerUrl = dotenv.env['EXTRACTOR_WORKER_URL'] ?? '';
+    final envUrl = dotenv.env['HF_SPACE_URL'] ?? '';
+    _workerUrl = envUrl.isNotEmpty
+        ? (envUrl.endsWith('/') ? envUrl.substring(0, envUrl.length - 1) : envUrl)
+        : 'https://nikhil1776-torrentindex.hf.space';
   }
 
   bool get isConfigured => _workerUrl.isNotEmpty;

@@ -23,25 +23,35 @@ class TorrentCacheService {
   }
 
   /// Check if the caching server is alive and configured.
+  /// If it is offline (e.g. HuggingFace space sleeping), it will send a wake-up request
+  /// and retry up to 3 times to allow the container to boot.
   Future<CacheServerHealth> healthCheck() async {
-    try {
-      final resp = await http.get(
-        Uri.parse('$_baseUrl/api/health'),
-        headers: {'User-Agent': _ua},
-      ).timeout(_timeout);
+    int attempts = 3;
+    for (int i = 0; i < attempts; i++) {
+      try {
+        debugPrint('[TorrentCache] Checking server health (attempt ${i + 1}/$attempts)...');
+        final resp = await http.get(
+          Uri.parse('$_baseUrl/api/health'),
+          headers: {'User-Agent': _ua},
+        ).timeout(i == 0 ? const Duration(seconds: 5) : _timeout); // First attempt fast timeout to start wakeup
 
-      if (resp.statusCode == 200) {
-        final data = jsonDecode(resp.body);
-        return CacheServerHealth(
-          isOnline: true,
-          aria2Running: data['aria2'] == true,
-          gdriveConfigured: data['gdrive'] == true,
-          geminiConfigured: data['gemini'] == true,
-          cacheExpiryHours: data['cache_expiry_hours'] ?? 24,
-        );
+        if (resp.statusCode == 200) {
+          final data = jsonDecode(resp.body);
+          return CacheServerHealth(
+            isOnline: true,
+            aria2Running: data['aria2'] == true,
+            gdriveConfigured: data['gdrive'] == true,
+            geminiConfigured: data['gemini'] == true,
+            cacheExpiryHours: data['cache_expiry_hours'] ?? 24,
+          );
+        }
+      } catch (e) {
+        debugPrint('[TorrentCache] Health check attempt ${i + 1} failed: $e');
       }
-    } catch (e) {
-      debugPrint('[TorrentCache] Health check failed: $e');
+      if (i < attempts - 1) {
+        // Wait 3 seconds before retrying to give HuggingFace space time to spin up
+        await Future.delayed(const Duration(seconds: 3));
+      }
     }
     return const CacheServerHealth(isOnline: false);
   }

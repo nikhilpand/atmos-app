@@ -73,7 +73,7 @@ class StreamExtractorService {
   static const _ua = 'Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36';
 
   /// All available provider keys for server selection UI
-  static const availableProviders = ['VidAPI', 'Videasy', 'VidLink', 'VidFast', 'Vidsync', 'Hexa', 'Consumet', 'Torrentio', 'VegaMovies', 'Stremio'];
+  static const availableProviders = ['VidAPI', 'Videasy', 'VidLink', 'Consumet', 'Torrentio', 'VegaMovies', 'Stremio'];
 
   // Lazy-initialized external providers
   final _torrentioService = TorrentioService();
@@ -669,44 +669,7 @@ class StreamExtractorService {
     int season = 1,
     int episode = 1,
   }) async {
-    if (tmdbId.isEmpty || tmdbId == '0') return null;
-
-    try {
-      debugPrint('[Extractor] 🎯 VidFast (enc-dec) for tmdb=$tmdbId');
-
-      // Step 1: Encrypt
-      final encResp = await http.get(
-        Uri.parse('https://enc-dec.app/api/enc-vidfast?text=$tmdbId'),
-        headers: {'User-Agent': _ua},
-      ).timeout(const Duration(seconds: 5));
-
-      if (encResp.statusCode != 200) return null;
-
-      final encData = jsonDecode(encResp.body);
-      if (encData['status'] != 200 || encData['result'] == null) {
-        debugPrint('[Extractor] VidFast enc failed: ${encData['error'] ?? 'unknown'}');
-        return null;
-      }
-
-      final encryptedBlob = encData['result'].toString();
-
-      // Step 2: Decrypt
-      final decResp = await http.post(
-        Uri.parse('https://enc-dec.app/api/dec-vidfast'),
-        headers: {'Content-Type': 'application/json', 'User-Agent': _ua},
-        body: jsonEncode({'text': encryptedBlob}),
-      ).timeout(const Duration(seconds: 6));
-
-      if (decResp.statusCode != 200) return null;
-
-      return _parseEncDecSourceResponse(
-        decResp.body,
-        providerName: 'VidFast',
-        referer: 'https://vidfast.pro/',
-      );
-    } catch (e) {
-      debugPrint('[Extractor] VidFast failed: $e');
-    }
+    // Disabled: VidFast provider is permanently offline/broken.
     return null;
   }
 
@@ -718,44 +681,7 @@ class StreamExtractorService {
     int season = 1,
     int episode = 1,
   }) async {
-    if (tmdbId.isEmpty || tmdbId == '0') return null;
-
-    try {
-      debugPrint('[Extractor] 🎯 Vidsync (enc-dec) for tmdb=$tmdbId');
-
-      // Step 1: Encrypt
-      final encResp = await http.get(
-        Uri.parse('https://enc-dec.app/api/enc-vidsync'),
-        headers: {'User-Agent': _ua},
-      ).timeout(const Duration(seconds: 5));
-
-      if (encResp.statusCode != 200) return null;
-
-      final encData = jsonDecode(encResp.body);
-      if (encData['status'] != 200 || encData['result'] == null) {
-        debugPrint('[Extractor] Vidsync enc failed: ${encData['error'] ?? 'unknown'}');
-        return null;
-      }
-
-      final encryptedBlob = encData['result'].toString();
-
-      // Step 2: Decrypt with tmdbId
-      final decResp = await http.post(
-        Uri.parse('https://enc-dec.app/api/dec-vidsync'),
-        headers: {'Content-Type': 'application/json', 'User-Agent': _ua},
-        body: jsonEncode({'text': encryptedBlob, 'id': tmdbId}),
-      ).timeout(const Duration(seconds: 6));
-
-      if (decResp.statusCode != 200) return null;
-
-      return _parseEncDecSourceResponse(
-        decResp.body,
-        providerName: 'Vidsync',
-        referer: 'https://vidsync.xyz/',
-      );
-    } catch (e) {
-      debugPrint('[Extractor] Vidsync failed: $e');
-    }
+    // Disabled: Vidsync provider is permanently offline/broken.
     return null;
   }
 
@@ -767,59 +693,7 @@ class StreamExtractorService {
     int season = 1,
     int episode = 1,
   }) async {
-    if (tmdbId.isEmpty || tmdbId == '0') return null;
-
-    try {
-      debugPrint('[Extractor] 🎯 Hexa (enc-dec) for tmdb=$tmdbId');
-
-      // Step 1: Get encryption key
-      final encResp = await http.get(
-        Uri.parse('https://enc-dec.app/api/enc-hexa'),
-        headers: {'User-Agent': _ua},
-      ).timeout(const Duration(seconds: 5));
-
-      if (encResp.statusCode != 200) return null;
-
-      final encData = jsonDecode(encResp.body);
-      if (encData['status'] != 200 || encData['result'] == null) {
-        debugPrint('[Extractor] Hexa enc failed: ${encData['error'] ?? 'unknown'}');
-        return null;
-      }
-
-      final key = encData['result'].toString();
-
-      // Step 2: Build the Hexa URL and fetch encrypted page
-      final hexaPath = type == 'tv'
-          ? '/watch/tv/$tmdbId/$season/$episode'
-          : '/watch/movie/$tmdbId';
-
-      final hexaResp = await http.get(
-        Uri.parse('https://hexa.watch$hexaPath'),
-        headers: {
-          'User-Agent': _ua,
-          'Referer': 'https://hexa.watch/',
-        },
-      ).timeout(const Duration(seconds: 6));
-
-      if (hexaResp.statusCode != 200) return null;
-
-      // Step 3: Decrypt with the key
-      final decResp = await http.post(
-        Uri.parse('https://enc-dec.app/api/dec-hexa'),
-        headers: {'Content-Type': 'application/json', 'User-Agent': _ua},
-        body: jsonEncode({'text': hexaResp.body, 'key': key}),
-      ).timeout(const Duration(seconds: 6));
-
-      if (decResp.statusCode != 200) return null;
-
-      return _parseEncDecSourceResponse(
-        decResp.body,
-        providerName: 'Hexa',
-        referer: 'https://hexa.watch/',
-      );
-    } catch (e) {
-      debugPrint('[Extractor] Hexa failed: $e');
-    }
+    // Disabled: Hexa provider is permanently offline/broken.
     return null;
   }
 
@@ -857,6 +731,34 @@ class StreamExtractorService {
       // Parse sources array
       final sources = sourcesMap['sources'] ?? sourcesMap['data'];
       if (sources is! List || sources.isEmpty) {
+        // Try VidLink new structure: {"stream": {"playlist": "..."}}
+        if (sourcesMap.containsKey('stream') && sourcesMap['stream'] is Map) {
+          final streamMap = sourcesMap['stream'] as Map<String, dynamic>;
+          final directUrl = (streamMap['playlist'] ?? streamMap['url'] ?? streamMap['file'] ?? '').toString();
+          if (directUrl.isNotEmpty) {
+            final subs = <SubtitleInfo>[];
+            final captionsRaw = streamMap['captions'] ?? streamMap['subtitles'] ?? streamMap['tracks'];
+            if (captionsRaw is List) {
+              for (final sub in captionsRaw) {
+                if (sub is! Map) continue;
+                final subUrl = (sub['url'] ?? sub['file'] ?? sub['src'] ?? '').toString();
+                final lang = (sub['language'] ?? sub['lang'] ?? sub['label'] ?? '').toString();
+                final label = (sub['label'] ?? '').toString();
+                if (subUrl.isNotEmpty) {
+                  subs.add(SubtitleInfo(url: subUrl, lang: lang, label: label));
+                }
+              }
+            }
+            debugPrint('[Extractor] ✅ $providerName (stream mapping) → $directUrl, ${subs.length} subs');
+            return ExtractedStream(
+              url: directUrl,
+              headers: {'Referer': referer, 'User-Agent': _ua},
+              providerName: providerName,
+              subtitles: subs,
+            );
+          }
+        }
+
         // Try flat structure: {"url": "...", "file": "..."}
         final directUrl = (sourcesMap['url'] ?? sourcesMap['file'] ?? sourcesMap['stream_url'] ?? '').toString();
         if (directUrl.isNotEmpty && (directUrl.contains('.m3u8') || directUrl.contains('.mp4') || directUrl.startsWith('http'))) {

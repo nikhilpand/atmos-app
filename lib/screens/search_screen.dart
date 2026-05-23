@@ -62,18 +62,16 @@ class _SearchScreenState extends ConsumerState<SearchScreen> {
       backgroundColor: cs.surface,
       appBar: AppBar(
         // Remove back button if it's rendered within the shell context or use standard back
-        leading: Focus(
-          child: IconButton(
-            onPressed: () {
-              if (Navigator.of(context).canPop()) {
-                context.pop();
-              } else {
-                context.go('/');
-              }
-            },
-            icon: const Icon(Icons.arrow_back_rounded),
-            color: cs.onSurface,
-          ),
+        leading: IconButton(
+          onPressed: () {
+            if (Navigator.of(context).canPop()) {
+              context.pop();
+            } else {
+              context.go('/');
+            }
+          },
+          icon: const Icon(Icons.arrow_back_rounded),
+          color: cs.onSurface,
         ),
         title: TextField(
           controller: _controller,

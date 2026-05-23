@@ -42,6 +42,16 @@ class _MediaCardState extends State<MediaCard> {
     return Focus(
       autofocus: widget.autofocus,
       onFocusChange: (v) => setState(() => _isFocused = v),
+      onKeyEvent: (FocusNode node, KeyEvent event) {
+        if (event is KeyDownEvent &&
+            (event.logicalKey == LogicalKeyboardKey.enter ||
+                event.logicalKey == LogicalKeyboardKey.select)) {
+          HapticFeedback.selectionClick();
+          widget.onTap();
+          return KeyEventResult.handled;
+        }
+        return KeyEventResult.ignored;
+      },
       child: GestureDetector(
         onTap: () {
           HapticFeedback.selectionClick(); // P16: haptic on every card tap
