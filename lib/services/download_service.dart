@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:convert';
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:hive_flutter/hive_flutter.dart';
@@ -269,12 +270,20 @@ class DownloadService extends ChangeNotifier {
     DownloadTask task, String url, Map<String, String> headers, {
     int maxRetries = 3,
   }) async {
+    final lowercaseUrl = url.toLowerCase();
+    if (lowercaseUrl.contains('.m3u8') || lowercaseUrl.contains('mpegurl')) {
+      final safeTitle = task.title.replaceAll(RegExp(r'[^\w\s-]'), '').replaceAll(' ', '_');
+      final seasonTag = task.season != null ? '_S${task.season}E${task.episode}' : '';
+      final dir = await _getDownloadDir();
+      final filePath = '${dir.path}/$safeTitle${seasonTag}_${task.quality}.mp4';
+      _processHlsDownload(task, url, headers, filePath);
+      return;
+    }
+
     for (int attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         final client = HttpClient();
-        final request = await client.getUrl(Uri.parse(url));
-        headers.forEach((k, v) => request.headers.set(k, v));
-
+        
         // Build filename
         final safeTitle = task.title.replaceAll(RegExp(r'[^\w\s-]'), '').replaceAll(' ', '_');
         final ext = url.contains('.mkv') ? 'mkv' : 'mp4';
@@ -284,17 +293,53 @@ class DownloadService extends ChangeNotifier {
         final file = File(filePath);
 
         // ── HTTP Range Resume ──
-        // If partial file exists, resume from where we left off
         int startByte = 0;
         if (await file.exists()) {
           startByte = await file.length();
-          if (startByte > 0) {
-            request.headers.set('Range', 'bytes=$startByte-');
-            debugPrint('[DownloadService] Resuming from byte $startByte');
-          }
         }
 
-        final response = await request.close();
+        var currentUrl = url;
+        HttpClientResponse response;
+        var request = await client.getUrl(Uri.parse(currentUrl));
+        headers.forEach((k, v) => request.headers.set(k, v));
+        if (startByte > 0) {
+          request.headers.set('Range', 'bytes=$startByte-');
+          debugPrint('[DownloadService] Resuming from byte $startByte');
+        }
+        response = await request.close();
+
+        // ── Google Drive virus warning bypass ──
+        final contentType = response.headers.contentType?.toString() ?? '';
+        if (contentType.contains('text/html') && currentUrl.contains('drive.google.com')) {
+          final htmlContent = await response.transform(utf8.decoder).join();
+          client.close();
+          
+          final confirmMatch = RegExp(r'confirm=([a-zA-Z0-9_-]+)').firstMatch(htmlContent);
+          if (confirmMatch != null) {
+            final token = confirmMatch.group(1);
+            final uri = Uri.parse(currentUrl);
+            final newQuery = Map<String, String>.from(uri.queryParameters);
+            newQuery['confirm'] = token!;
+            currentUrl = uri.replace(queryParameters: newQuery).toString();
+            debugPrint('[DownloadService] Google Drive virus warning bypassed. Retrying with token.');
+            
+            final retryClient = HttpClient();
+            final retryRequest = await retryClient.getUrl(Uri.parse(currentUrl));
+            headers.forEach((k, v) => retryRequest.headers.set(k, v));
+            if (startByte > 0) {
+              retryRequest.headers.set('Range', 'bytes=$startByte-');
+            }
+            response = await retryRequest.close();
+          } else {
+            await _failTask(task, 'Received HTML page instead of stream.');
+            return;
+          }
+        } else if (contentType.contains('text/html') && currentUrl.contains('pixeldrain.com')) {
+          client.close();
+          await _failTask(task, 'PixelDrain returned HTML error page.');
+          return;
+        }
+
         if (response.statusCode != 200 && response.statusCode != 206) {
           await _failTask(task, 'HTTP ${response.statusCode}');
           client.close();
@@ -305,7 +350,6 @@ class DownloadService extends ChangeNotifier {
         final contentRange = response.headers['content-range']?.first;
         int totalBytes;
         if (contentRange != null) {
-          // Format: bytes 123-456/789
           final totalMatch = RegExp(r'/(\d+)').firstMatch(contentRange);
           totalBytes = int.tryParse(totalMatch?.group(1) ?? '') ?? -1;
         } else {
@@ -332,7 +376,6 @@ class DownloadService extends ChangeNotifier {
           sink.add(chunk);
           received += chunk.length;
 
-          // Calculate speed every 500ms
           final now = DateTime.now();
           final dt = now.difference(lastSpeedCheck).inMilliseconds;
           if (dt > 500) {
@@ -360,10 +403,9 @@ class DownloadService extends ChangeNotifier {
         _processNextQueued();
 
         debugPrint('[DownloadService] Stream download complete: $filePath');
-        return; // Success — exit retry loop
+        return;
       } catch (e) {
         if (attempt < maxRetries) {
-          // Exponential backoff: 2s, 4s, 8s
           final delay = Duration(seconds: (1 << attempt) * 2);
           debugPrint('[DownloadService] Retry ${attempt + 1}/$maxRetries in ${delay.inSeconds}s: $e');
           await Future.delayed(delay);
@@ -373,6 +415,171 @@ class DownloadService extends ChangeNotifier {
       }
     }
   }
+
+  Future<void> _processHlsDownload(
+    DownloadTask task,
+    String m3u8Url,
+    Map<String, String> headers,
+    String filePath,
+  ) async {
+    try {
+      final client = HttpClient();
+      
+      // 1. Fetch the master or media playlist
+      final playlistUri = Uri.parse(m3u8Url);
+      final request = await client.getUrl(playlistUri);
+      headers.forEach((k, v) => request.headers.set(k, v));
+      final response = await request.close();
+      
+      if (response.statusCode != 200) {
+        await _failTask(task, 'HLS playlist fetch failed: HTTP ${response.statusCode}');
+        client.close();
+        return;
+      }
+      
+      final body = await response.transform(utf8.decoder).join();
+      client.close();
+      
+      final lines = body.split('\n').map((l) => l.trim()).toList();
+      
+      String? mediaPlaylistUrl;
+      for (final line in lines) {
+        if (line.isEmpty) continue;
+        if (!line.startsWith('#')) {
+          if (line.contains('.m3u8')) {
+            mediaPlaylistUrl = _resolveUrl(m3u8Url, line);
+            break;
+          }
+        }
+      }
+      
+      String finalPlaylistBody = body;
+      String finalPlaylistUrl = m3u8Url;
+      if (mediaPlaylistUrl != null) {
+        final client2 = HttpClient();
+        final req2 = await client2.getUrl(Uri.parse(mediaPlaylistUrl));
+        headers.forEach((k, v) => req2.headers.set(k, v));
+        final resp2 = await req2.close();
+        if (resp2.statusCode == 200) {
+          finalPlaylistBody = await resp2.transform(utf8.decoder).join();
+          finalPlaylistUrl = mediaPlaylistUrl;
+        }
+        client2.close();
+      }
+      
+      final mediaLines = finalPlaylistBody.split('\n').map((l) => l.trim()).toList();
+      final segmentUrls = <String>[];
+      
+      for (final line in mediaLines) {
+        if (line.isEmpty) continue;
+        if (!line.startsWith('#')) {
+          segmentUrls.add(_resolveUrl(finalPlaylistUrl, line));
+        }
+      }
+      
+      if (segmentUrls.isEmpty) {
+        await _failTask(task, 'No HLS segments found in playlist.');
+        return;
+      }
+      
+      debugPrint('[DownloadService] Starting HLS download with ${segmentUrls.length} segments.');
+      task.fileSizeBytes = 0;
+      
+      final file = File(filePath);
+      final sink = file.openWrite(mode: FileMode.write);
+      
+      int downloadedSegments = 0;
+      final totalSegments = segmentUrls.length;
+      
+      DateTime lastSpeedCheck = DateTime.now();
+      int lastBytes = 0;
+      int receivedBytes = 0;
+      
+      for (int i = 0; i < totalSegments; i++) {
+        if (task.status == DownloadStatus.paused) {
+          await sink.close();
+          return;
+        }
+        
+        final segUrl = segmentUrls[i];
+        bool segmentSuccess = false;
+        
+        for (int retry = 0; retry < 3; retry++) {
+          try {
+            final segClient = HttpClient();
+            final segReq = await segClient.getUrl(Uri.parse(segUrl));
+            headers.forEach((k, v) => segReq.headers.set(k, v));
+            final segResp = await segReq.close();
+            
+            if (segResp.statusCode == 200) {
+              await for (final chunk in segResp) {
+                if (task.status == DownloadStatus.paused) {
+                  await sink.close();
+                  segClient.close();
+                  return;
+                }
+                sink.add(chunk);
+                receivedBytes += chunk.length;
+              }
+              segmentSuccess = true;
+              segClient.close();
+              break;
+            }
+            segClient.close();
+          } catch (e) {
+            debugPrint('[DownloadService] Segment ${i + 1} download attempt ${retry + 1} failed: $e');
+            await Future.delayed(const Duration(seconds: 1));
+          }
+        }
+        
+        if (!segmentSuccess) {
+          await sink.close();
+          await _failTask(task, 'Failed to download HLS segment ${i + 1}');
+          return;
+        }
+        
+        downloadedSegments++;
+        
+        final now = DateTime.now();
+        final dt = now.difference(lastSpeedCheck).inMilliseconds;
+        if (dt > 500) {
+          final db = receivedBytes - lastBytes;
+          task.downloadSpeed = db / (dt / 1000.0);
+          lastBytes = receivedBytes;
+          lastSpeedCheck = now;
+        }
+        
+        task.downloadedBytes = receivedBytes;
+        task.progress = downloadedSegments / totalSegments;
+        task.save();
+        _scheduleNotify();
+      }
+      
+      await sink.close();
+      
+      task.status = DownloadStatus.completed;
+      task.filePath = filePath;
+      task.progress = 1.0;
+      task.downloadSpeed = 0;
+      task.fileSizeBytes = receivedBytes;
+      await task.save();
+      _scheduleNotify();
+      _processNextQueued();
+      
+      debugPrint('[DownloadService] HLS download complete: $filePath');
+    } catch (e) {
+      await _failTask(task, 'HLS download failed: $e');
+    }
+  }
+
+  String _resolveUrl(String baseUrl, String relativeUrl) {
+    if (relativeUrl.startsWith('http://') || relativeUrl.startsWith('https://')) {
+      return relativeUrl;
+    }
+    final baseUri = Uri.parse(baseUrl);
+    return baseUri.resolve(relativeUrl).toString();
+  }
+
 
   Future<Directory> _getDownloadDir() async {
     // Use path_provider for reliable cross-device paths
