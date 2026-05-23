@@ -273,7 +273,13 @@ class TorrentioService {
           ).timeout(const Duration(seconds: 4));
 
           if (headRes.statusCode == 200 || headRes.statusCode == 206) {
-            debugPrint('[Webtor] ✅ Stream validated via $mirror');
+            // Validate content-type — must be a video/binary, not HTML
+            final ct = (headRes.headers['content-type'] ?? '').toLowerCase();
+            if (ct.contains('text/html') || ct.contains('text/plain')) {
+              debugPrint('[Webtor] ❌ $mirror returned HTML/text — torrent not ready');
+              return null;
+            }
+            debugPrint('[Webtor] ✅ Stream validated via $mirror (content-type: $ct)');
             return streamUrl;
           }
 
@@ -302,10 +308,10 @@ class TorrentioService {
       if (url != null) return url;
     }
 
-    // Final fallback: construct URL with first mirror (may need seeding time)
-    final fallbackUrl = '${mirrors[0]}/stream?magnet=$encodedMagnet&file_index=$fileIdx';
-    debugPrint('[Webtor] ⚠️ Using unvalidated fallback URL');
-    return fallbackUrl;
+    // Return null instead of an unvalidated fallback URL.
+    // This prevents the download service from downloading HTML pages.
+    debugPrint('[Webtor] ⚠️ All mirrors failed to validate stream for $infoHash');
+    return null;
   }
 
   /// Full extraction: Torrentio → best source → Webtor.io → ExtractedStream

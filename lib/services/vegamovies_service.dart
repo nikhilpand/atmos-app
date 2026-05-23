@@ -273,4 +273,41 @@ class VegaMoviesService {
 
     return links;
   }
+
+  /// Resolve a shortener URL to a direct download link via the backend.
+  /// Handles: hubcloud, vgmlinks, fast-dl, nexdrive, and other shorteners.
+  /// For gdrive/pixeldrain links, returns the directUrl without backend call.
+  Future<String> resolveDownloadUrl(VegaDownloadLink link) async {
+    // GDrive and PixelDrain already have client-side resolution
+    if (link.host == 'gdrive' || link.host == 'pixeldrain') {
+      return link.directUrl;
+    }
+
+    // For shortener hosts, use the backend resolver
+    if (!isConfigured) return link.directUrl;
+
+    try {
+      final uri = Uri.parse('$_workerUrl/vegamovies/resolve')
+          .replace(queryParameters: {'url': link.url});
+      final res = await http
+          .get(uri, headers: {'User-Agent': _ua})
+          .timeout(const Duration(seconds: 15));
+
+      if (res.statusCode == 200) {
+        final body = jsonDecode(res.body);
+        if (body['resolved'] == true && body['url'] != null) {
+          final resolved = body['url'] as String;
+          debugPrint('[VegaMovies] Resolved ${link.host} link → $resolved');
+          return resolved;
+        } else {
+          debugPrint('[VegaMovies] Resolver failed: ${body['error']}');
+        }
+      }
+    } catch (e) {
+      debugPrint('[VegaMovies] Resolve error: $e');
+    }
+
+    // Fallback to the original directUrl
+    return link.directUrl;
+  }
 }

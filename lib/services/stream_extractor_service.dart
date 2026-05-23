@@ -273,10 +273,12 @@ class StreamExtractorService {
       case 'VidAPI':
         return extractVidAPIDirect(imdbId: imdbId, tmdbId: tmdbId, type: type, season: season, episode: episode);
       case 'Videasy':
+        if (title.isEmpty) return null; // title required for search
         return extractVideasyDirect(tmdbId: tmdbId, title: title, type: type, imdbId: imdbId, season: season, episode: episode);
       case 'VidLink':
         return extractVidLinkDirect(tmdbId: tmdbId, type: type, season: season, episode: episode);
       case 'Consumet':
+        if (title.isEmpty) return null; // title required for anime search
         final envUrl = dotenv.env['HF_SPACE_URL'] ?? '';
         final hfUrl = envUrl.isNotEmpty
             ? (envUrl.endsWith('/') ? envUrl.substring(0, envUrl.length - 1) : envUrl)
@@ -296,6 +298,7 @@ class StreamExtractorService {
           imdbId: imdbId, type: type, season: season, episode: episode,
         );
       case 'VegaMovies':
+        if (title.isEmpty) return null; // title required for search
         return _vegaMoviesService.extractStream(
           title: title,
           year: null,

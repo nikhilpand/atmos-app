@@ -236,11 +236,13 @@ Prioritize quality hidden gems over obvious mainstream picks.
 Return ONLY valid JSON array."""
     try:
         r = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}",
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}",
             json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"responseMimeType": "application/json"}},
-            timeout=15
+            timeout=30
         )
-        if r.status_code != 200: raise HTTPException(502, f"Gemini {r.status_code}")
+        if r.status_code != 200:
+            logger.error(f"Gemini recommend failed: HTTP {r.status_code} — {r.text[:500]}")
+            raise HTTPException(502, f"Gemini {r.status_code}")
         text = r.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "[]")
         return {"recommendations": json.loads(text.strip())}
     except json.JSONDecodeError: raise HTTPException(502, "Gemini returned invalid JSON")
@@ -265,11 +267,13 @@ Good examples: "Mind-Bending Thrillers", "Anime After Dark", "Feel-Good Weekend 
 Return ONLY valid JSON."""
     try:
         r = requests.post(
-            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}",
+            f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}",
             json={"contents": [{"parts": [{"text": prompt}]}], "generationConfig": {"responseMimeType": "application/json"}},
-            timeout=15
+            timeout=30
         )
-        if r.status_code != 200: raise HTTPException(502, f"Gemini {r.status_code}")
+        if r.status_code != 200:
+            logger.error(f"Gemini categorize failed: HTTP {r.status_code} — {r.text[:500]}")
+            raise HTTPException(502, f"Gemini {r.status_code}")
         text = r.json().get("candidates", [{}])[0].get("content", {}).get("parts", [{}])[0].get("text", "[]")
         return {"categories": json.loads(text.strip())}
     except json.JSONDecodeError: raise HTTPException(502, "Gemini returned invalid JSON")
@@ -559,6 +563,136 @@ async def anime_watch(provider: str, episode_id: str):
         logger.error(f"Anime watch error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# ── VegaMovies Link Resolver ───────────────────────────────────────────────────
+@app.get("/vegamovies/resolve")
+async def vegamovies_resolve(url: str):
+    """
+    Resolve a VegaMovies shortener/redirect URL to a direct download URL.
+    Handles: hubcloud, vgmlinks, fast-dl, nexdrive, and other common shorteners.
+    """
+    if not url:
+        raise HTTPException(status_code=400, detail="Missing url parameter")
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+
+    def _try_resolve(target_url: str, depth: int = 0) -> dict:
+        """Recursively follow redirects and extract direct links, max 5 hops."""
+        if depth > 5:
+            return {"resolved": False, "error": "Too many redirects", "url": target_url}
+
+        try:
+            # First try HEAD to check for direct redirect
+            r = requests.head(target_url, headers=headers, allow_redirects=False, timeout=8)
+            if r.status_code in (301, 302, 303, 307, 308):
+                redirect_url = r.headers.get("Location", "")
+                if redirect_url:
+                    if redirect_url.startswith("/"):
+                        from urllib.parse import urlparse
+                        parsed = urlparse(target_url)
+                        redirect_url = f"{parsed.scheme}://{parsed.netloc}{redirect_url}"
+                    # Check if the redirect is to a direct file
+                    low = redirect_url.lower()
+                    if any(ext in low for ext in ['.mp4', '.mkv', '.avi', '.webm', '.zip', '.rar']):
+                        return {"resolved": True, "url": redirect_url, "host": "direct"}
+                    # If it redirects to a known CDN/direct domain, return it
+                    if any(cdn in low for cdn in ['googleapis.com', 'pixeldrain.com/api/', 'cdn.', 'download.', 'mediafire.com/file/']):
+                        return {"resolved": True, "url": redirect_url, "host": "cdn"}
+                    return _try_resolve(redirect_url, depth + 1)
+
+            # If HEAD didn't redirect, GET the page and parse for download links
+            r = requests.get(target_url, headers=headers, timeout=10, allow_redirects=True)
+            if r.status_code != 200:
+                return {"resolved": False, "error": f"HTTP {r.status_code}", "url": target_url}
+
+            content_type = r.headers.get("Content-Type", "")
+            # If we got a binary file directly, return the final URL
+            if "text/html" not in content_type and "application/json" not in content_type:
+                return {"resolved": True, "url": str(r.url), "host": "direct"}
+
+            page = r.text
+            final_url = str(r.url)
+
+            # ── HubCloud patterns ──
+            # Pattern 1: direct download button with href
+            hub_patterns = [
+                r'href=["\']?(https?://[^"\'\s]+(?:\.mp4|\.mkv|\.zip|\.rar)[^"\'\s]*)["\']?',
+                r'id=["\']?download["\']?[^>]*href=["\']?(https?://[^"\'\s]+)["\']?',
+                r'class=["\']?btn[^"\']*download[^"\']*["\']?[^>]*href=["\']?(https?://[^"\'\s]+)["\']?',
+                r'href=["\']?(https?://[^"\'\s]*(?:hubcdn|hubcloud|hub\.)[^"\'\s]+)["\']?',
+                # Common CDN download links
+                r'href=["\']?(https?://[^"\'\s]*(?:cdn|download|dl|get)\.[^"\'\s]+(?:\.mp4|\.mkv|\.zip|\.rar|/file/)[^"\'\s]*)["\']?',
+                # Direct links with download keyword
+                r'href=["\']?(https?://[^"\'\s]+/download/[^"\'\s]+)["\']?',
+                # Links in data attributes
+                r'data-url=["\']?(https?://[^"\'\s]+)["\']?',
+                r'data-href=["\']?(https?://[^"\'\s]+)["\']?',
+            ]
+
+            for pat in hub_patterns:
+                matches = re.findall(pat, page, re.I)
+                for match in matches:
+                    low = match.lower()
+                    # Skip the current page URL, social links, and tracking
+                    if match == target_url or match == final_url:
+                        continue
+                    if any(skip in low for skip in ['facebook.', 'twitter.', 'instagram.', 'telegram.', 'javascript:', '#', 'ads.', 'analytics.']):
+                        continue
+                    # If it looks like a real file or CDN link
+                    if any(ext in low for ext in ['.mp4', '.mkv', '.zip', '.rar', '/download/', '/file/', '/dl/']):
+                        return {"resolved": True, "url": match, "host": "resolved"}
+                    # If it's a CDN domain
+                    if any(cdn in low for cdn in ['cdn.', 'download.', 'dl.', 'get.', 'cloud.', 'storage.']):
+                        return {"resolved": True, "url": match, "host": "cdn"}
+
+            # ── VGMLinks / Fast-DL patterns ──
+            # These often use JS-based countdown + redirect
+            # Look for the actual download URL in script tags
+            script_url_patterns = [
+                r'var\s+url\s*=\s*["\']?(https?://[^"\'\s;]+)["\']?',
+                r'window\.location\s*=\s*["\']?(https?://[^"\'\s;]+)["\']?',
+                r'window\.location\.href\s*=\s*["\']?(https?://[^"\'\s;]+)["\']?',
+                r'location\.href\s*=\s*["\']?(https?://[^"\'\s;]+)["\']?',
+                r'window\.open\(["\']?(https?://[^"\'\s,)]+)["\']?',
+                r'redirect.*?["\']?(https?://[^"\'\s;]+)["\']?',
+            ]
+
+            for pat in script_url_patterns:
+                matches = re.findall(pat, page, re.I)
+                for match in matches:
+                    low = match.lower()
+                    if match == target_url or match == final_url:
+                        continue
+                    if any(skip in low for skip in ['facebook.', 'twitter.', 'ads.', 'analytics.', 'javascript:']):
+                        continue
+                    # Found a redirect URL in scripts — try to resolve it further
+                    return _try_resolve(match, depth + 1)
+
+            # ── Nexdrive patterns ──
+            # Look for form action or API endpoint
+            form_action = re.search(r'<form[^>]+action=["\']?(https?://[^"\'\s>]+)["\']?', page, re.I)
+            if form_action:
+                action_url = form_action.group(1)
+                if action_url != target_url and action_url != final_url:
+                    return _try_resolve(action_url, depth + 1)
+
+            # If nothing found but we did redirect, return the final URL
+            if final_url != target_url:
+                return {"resolved": True, "url": final_url, "host": "redirect"}
+
+            return {"resolved": False, "error": "Could not extract direct link from page", "url": target_url}
+
+        except requests.Timeout:
+            return {"resolved": False, "error": "Request timeout", "url": target_url}
+        except Exception as e:
+            logger.error(f"VegaMovies resolve error for {target_url}: {e}")
+            return {"resolved": False, "error": str(e), "url": target_url}
+
+    result = _try_resolve(url)
+    return result
+
 # ── Stateless Scraper Endpoints ────────────────────────────────────────────────
 @app.get("/api/extract/vidapi")
 async def extract_vidapi(
@@ -634,13 +768,15 @@ async def extract_vidapi(
 @app.get("/api/extract/videasy")
 async def extract_videasy(
     tmdb: str,
-    title: str,
+    title: Optional[str] = "",
     type: str = "movie",
     imdb: Optional[str] = None,
     season: Optional[int] = 1,
     episode: Optional[int] = 1,
     year: Optional[int] = 0
 ):
+    if not title or not title.strip():
+        raise HTTPException(status_code=400, detail="Missing title parameter")
     servers = ["mb-flix", "cdn", "moviebox", "hdmovie", "1movies", "m4uhd"]
     headers = {
         "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",

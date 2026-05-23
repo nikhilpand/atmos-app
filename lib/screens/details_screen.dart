@@ -14,7 +14,7 @@ import '../widgets/episode_tile.dart';
 import '../widgets/media_card.dart';
 import '../screens/download_screen.dart';
 import '../widgets/download_filter_sheet.dart';
-
+import '../services/vegamovies_service.dart';
 
 class DetailsScreen extends ConsumerStatefulWidget {
   final String mediaType;
@@ -592,10 +592,14 @@ class _PlayButtonState extends ConsumerState<_PlayButton> {
           return;
         }
 
+        // Keep original link objects for resolution
+        final linkMap = <String, VegaDownloadLink>{};
         final allOptions = results.map((link) {
+          final key = '${link.host}_${link.quality}_${link.url.hashCode}';
+          linkMap[key] = link;
           return QualityOption(
             quality: link.quality,
-            hash: link.directUrl, // Store direct URL in hash field
+            hash: key, // Store lookup key, NOT raw URL
             sizeBytes: _parseSize(link.sizeLabel),
             type: link.host,
             videoCodec: link.codec,
@@ -608,14 +612,46 @@ class _PlayButtonState extends ConsumerState<_PlayButton> {
           context,
           options: allOptions,
           title: widget.details.title,
-          onSelect: (q) {
+          onSelect: (q) async {
+            final link = linkMap[q.hash];
+            if (link == null) return;
+
+            // Show resolving indicator for shortener hosts
+            final needsResolve = link.host != 'gdrive' && link.host != 'pixeldrain';
+            if (needsResolve && mounted) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                SnackBar(
+                  content: Text('Resolving ${link.host} link...'),
+                  duration: const Duration(seconds: 10),
+                  behavior: SnackBarBehavior.floating,
+                ),
+              );
+            }
+
+            // Resolve the shortener URL to a direct download link
+            final vega = ref.read(vegaMoviesServiceProvider);
+            final resolvedUrl = await vega.resolveDownloadUrl(link);
+
+            if (!mounted) return;
+            ScaffoldMessenger.of(context).clearSnackBars();
+
+            if (resolvedUrl.isEmpty) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(
+                  content: Text('Could not resolve download link'),
+                  backgroundColor: Colors.red,
+                ),
+              );
+              return;
+            }
+
             final dl = ref.read(downloadServiceProvider);
             dl.startStreamDownload(
               tmdbId: widget.details.id,
               imdbId: widget.details.imdbId ?? '',
               title: widget.details.title,
               mediaType: 'movie',
-              streamUrl: q.hash, // direct link stored in hash
+              streamUrl: resolvedUrl,
               quality: q.quality,
               posterPath: widget.details.posterPath,
             );

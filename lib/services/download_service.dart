@@ -338,6 +338,13 @@ class DownloadService extends ChangeNotifier {
           client.close();
           await _failTask(task, 'PixelDrain returned HTML error page.');
           return;
+        } else if (contentType.contains('text/html')) {
+          // Generic catch-all: any other source returning HTML is a redirect/error page,
+          // not a video file. This prevents "instant download" of tiny HTML files.
+          client.close();
+          final host = Uri.tryParse(currentUrl)?.host ?? 'unknown';
+          await _failTask(task, 'Server ($host) returned an HTML page instead of a video file. The download link may have expired or needs resolving.');
+          return;
         }
 
         if (response.statusCode != 200 && response.statusCode != 206) {
@@ -393,6 +400,20 @@ class DownloadService extends ChangeNotifier {
 
         await sink.close();
         client.close();
+
+        // ── Minimum size sanity check ──
+        // A real video file should be at least 100KB.
+        // If it's smaller, it's almost certainly an error/redirect page.
+        final downloadedFile = File(filePath);
+        if (await downloadedFile.exists()) {
+          final fileSize = await downloadedFile.length();
+          if (fileSize < 100 * 1024) {  // < 100KB
+            debugPrint('[DownloadService] Downloaded file is only ${fileSize}B — likely not a video');
+            await downloadedFile.delete();
+            await _failTask(task, 'Downloaded file is too small (${(fileSize / 1024).toStringAsFixed(1)}KB). The link may be expired or invalid.');
+            return;
+          }
+        }
 
         task.status = DownloadStatus.completed;
         task.filePath = filePath;
