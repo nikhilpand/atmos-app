@@ -559,6 +559,551 @@ async def anime_watch(provider: str, episode_id: str):
         logger.error(f"Anime watch error: {e}")
         raise HTTPException(status_code=500, detail=str(e))
 
+# ── Stateless Scraper Endpoints ────────────────────────────────────────────────
+@app.get("/api/extract/vidapi")
+async def extract_vidapi(
+    imdb: Optional[str] = None,
+    tmdb: Optional[str] = None,
+    type: str = "movie",
+    season: Optional[int] = 1,
+    episode: Optional[int] = 1
+):
+    params = {}
+    if imdb and imdb.startswith("tt"):
+        params["imdb"] = imdb
+    elif tmdb and tmdb != "0":
+        params["tmdb"] = tmdb
+    else:
+        raise HTTPException(status_code=400, detail="Missing imdb or tmdb ID")
+    
+    params["type"] = "tv" if type == "tv" else "movie"
+    if type == "tv":
+        params["season"] = str(season)
+        params["episode"] = str(episode)
+        
+    url = "https://streamdata.vaplayer.ru/api.php"
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+        "Referer": "https://brightpathsignals.com/",
+        "Origin": "https://brightpathsignals.com",
+    }
+    try:
+        r = requests.get(url, params=params, headers=headers, timeout=10)
+        if r.status_code != 200:
+            raise HTTPException(status_code=r.status_code, detail=f"VidAPI returned HTTP {r.status_code}")
+        data = r.json()
+        if str(data.get("status_code")) != "200" or not data.get("data"):
+            raise HTTPException(status_code=404, detail="Stream not found in VidAPI response")
+            
+        stream_data = data["data"]
+        stream_urls = stream_data.get("stream_urls", [])
+        
+        qualities = []
+        if isinstance(stream_urls, list) and stream_urls:
+            quality_labels = ["1080p", "720p", "480p", "SD"]
+            for i, u in enumerate(stream_urls):
+                if not u:
+                    continue
+                label = quality_labels[i] if i < len(quality_labels) else f"Stream {i+1}"
+                qualities.append({"quality": label, "url": u})
+                
+        subtitles = []
+        default_subs = data.get("default_subs", [])
+        if isinstance(default_subs, list):
+            for sub in default_subs:
+                sub_url = sub.get("url") or sub.get("file") or ""
+                lang = sub.get("lang") or sub.get("label") or ""
+                if sub_url:
+                    subtitles.append({"url": sub_url, "lang": lang, "label": lang})
+                    
+        primary_url = stream_urls[0] if stream_urls else (stream_data.get("file") or stream_data.get("url") or stream_data.get("stream_url"))
+        if not primary_url:
+            raise HTTPException(status_code=404, detail="No valid stream URL found")
+            
+        return {
+            "url": primary_url,
+            "headers": headers,
+            "providerName": "VidAPI (HD)",
+            "qualities": qualities,
+            "subtitles": subtitles
+        }
+    except Exception as e:
+        logger.error(f"VidAPI extraction error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/extract/videasy")
+async def extract_videasy(
+    tmdb: str,
+    title: str,
+    type: str = "movie",
+    imdb: Optional[str] = None,
+    season: Optional[int] = 1,
+    episode: Optional[int] = 1,
+    year: Optional[int] = 0
+):
+    servers = ["mb-flix", "cdn", "moviebox", "hdmovie", "1movies", "m4uhd"]
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36",
+        "Referer": "https://player.videasy.net/",
+        "Origin": "https://player.videasy.net",
+    }
+    
+    for server in servers:
+        try:
+            params = {
+                "title": title,
+                "mediaType": "tv" if type == "tv" else "movie",
+                "tmdbId": tmdb,
+            }
+            if imdb:
+                params["imdbId"] = imdb
+            if year and year > 0:
+                params["year"] = str(year)
+            if type == "tv":
+                params["seasonId"] = str(season)
+                params["episodeId"] = str(episode)
+                
+            url = f"https://api.videasy.net/{server}/sources-with-title"
+            r = requests.get(url, params=params, headers=headers, timeout=5)
+            if r.status_code != 200 or not r.text:
+                continue
+                
+            encrypted_blob = r.text
+            if encrypted_blob.startswith("{"):
+                continue
+                
+            # Decrypt
+            dec_url = "https://enc-dec.app/api/dec-videasy"
+            dec_resp = requests.post(
+                dec_url,
+                headers={"Content-Type": "application/json", "User-Agent": headers["User-Agent"]},
+                json={"text": encrypted_blob, "id": tmdb},
+                timeout=6
+            )
+            if dec_resp.status_code != 200:
+                continue
+                
+            dec_data = dec_resp.json()
+            if dec_data.get("status") != 200 or not dec_data.get("result"):
+                continue
+                
+            result = dec_data["result"]
+            sources_map = {}
+            if isinstance(result, str):
+                sources_map = json.loads(result)
+            elif isinstance(result, dict):
+                sources_map = result
+            else:
+                continue
+                
+            sources = sources_map.get("sources", [])
+            if not sources or not isinstance(sources, list):
+                continue
+                
+            qualities = []
+            for s in sources:
+                if not isinstance(s, dict):
+                    continue
+                q = s.get("quality", "Auto")
+                u = s.get("url") or s.get("file") or ""
+                if u:
+                    qualities.append({"quality": q, "url": u})
+                    
+            subtitles = []
+            subtitles_raw = sources_map.get("subtitles", [])
+            if isinstance(subtitles_raw, list):
+                for sub in subtitles_raw:
+                    if not isinstance(sub, dict):
+                        continue
+                    sub_url = sub.get("url") or sub.get("file") or ""
+                    lang = sub.get("lang") or sub.get("language") or ""
+                    label = sub.get("label") or ""
+                    if sub_url:
+                        subtitles.append({"url": sub_url, "lang": lang, "label": label})
+                        
+            def pick_best_source(sources_list):
+                quality_order = ["1080p", "720p", "480p", "360p", "Auto"]
+                best_url = None
+                best_rank = len(quality_order)
+                for s in sources_list:
+                    if not isinstance(s, dict):
+                        continue
+                    q = s.get("quality", "")
+                    url = s.get("url") or s.get("file") or ""
+                    if not url:
+                        continue
+                    if q in quality_order:
+                        rank = quality_order.index(q)
+                        if rank < best_rank:
+                            best_rank = rank
+                            best_url = url
+                    else:
+                        if not best_url:
+                            best_url = url
+                return best_url
+                
+            stream_url = pick_best_source(sources)
+            if not stream_url:
+                continue
+                
+            def get_quality_label(sources_list, url):
+                for s in sources_list:
+                    if isinstance(s, dict) and (s.get("url") == url or s.get("file") == url):
+                        return s.get("quality", "")
+                return ""
+                
+            quality = get_quality_label(sources, stream_url)
+            
+            return {
+                "url": stream_url,
+                "headers": headers,
+                "providerName": f"Videasy/{server} ({quality})" if quality else f"Videasy/{server}",
+                "qualities": qualities,
+                "subtitles": subtitles
+            }
+        except Exception as e:
+            logger.error(f"Videasy/{server} failed: {e}")
+            
+    raise HTTPException(status_code=404, detail="Videasy failed to resolve stream")
+
+@app.get("/api/extract/vidlink")
+async def extract_vidlink(
+    tmdb: str,
+    type: str = "movie",
+    season: Optional[int] = 1,
+    episode: Optional[int] = 1
+):
+    if not tmdb or tmdb == "0":
+        raise HTTPException(status_code=400, detail="Invalid TMDB ID")
+        
+    ua = "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36"
+    
+    try:
+        enc_url = f"https://enc-dec.app/api/enc-vidlink?text={tmdb}"
+        r = requests.get(enc_url, headers={"User-Agent": ua}, timeout=5)
+        if r.status_code != 200:
+            raise HTTPException(status_code=r.status_code, detail="enc-dec.app returned error")
+            
+        enc_data = r.json()
+        if enc_data.get("status") != 200 or not enc_data.get("result"):
+            raise HTTPException(status_code=500, detail=f"enc-dec.app encryption failed: {enc_data.get('error', 'unknown')}")
+            
+        encrypted_id = str(enc_data["result"])
+        
+        api_path = f"/api/b/tv/{encrypted_id}/{season}/{episode}" if type == "tv" else f"/api/b/movie/{encrypted_id}"
+        source_url = f"https://vidlink.pro{api_path}"
+        
+        headers = {
+            "User-Agent": ua,
+            "Origin": "https://vidlink.pro",
+            "Referer": "https://vidlink.pro/",
+        }
+        
+        source_resp = requests.get(source_url, headers=headers, timeout=6)
+        if source_resp.status_code != 200:
+            raise HTTPException(status_code=source_resp.status_code, detail=f"VidLink API returned {source_resp.status_code}")
+            
+        data = source_resp.json()
+        sources_map = {}
+        if isinstance(data, dict) and "status" in data:
+            if data["status"] != 200 or not data.get("result"):
+                raise HTTPException(status_code=404, detail="VidLink returned invalid enc-dec status")
+            result = data["result"]
+            if isinstance(result, str):
+                sources_map = json.loads(result)
+            elif isinstance(result, dict):
+                sources_map = result
+            else:
+                raise HTTPException(status_code=404, detail="Invalid result format")
+        elif isinstance(data, dict):
+            sources_map = data
+        else:
+            raise HTTPException(status_code=404, detail="Invalid response format")
+            
+        sources = sources_map.get("sources") or sources_map.get("data")
+        
+        if not sources or not isinstance(sources, list):
+            if "stream" in sources_map and isinstance(sources_map["stream"], dict):
+                stream_map = sources_map["stream"]
+                direct_url = str(stream_map.get("playlist") or stream_map.get("url") or stream_map.get("file") or "")
+                if direct_url:
+                    subs = []
+                    captions_raw = stream_map.get("captions") or stream_map.get("subtitles") or stream_map.get("tracks") or []
+                    if isinstance(captions_raw, list):
+                        for sub in captions_raw:
+                            if not isinstance(sub, dict):
+                                continue
+                            sub_url = str(sub.get("url") or sub.get("file") or sub.get("src") or "")
+                            lang = str(sub.get("language") or sub.get("lang") or sub.get("label") or "")
+                            label = str(sub.get("label") or "")
+                            if sub_url:
+                                subs.append({"url": sub_url, "lang": lang, "label": label})
+                    return {
+                        "url": direct_url,
+                        "headers": headers,
+                        "providerName": "VidLink",
+                        "qualities": [{"quality": "Auto", "url": direct_url}],
+                        "subtitles": subs
+                    }
+                    
+            direct_url = str(sources_map.get("url") or sources_map.get("file") or sources_map.get("stream_url") or "")
+            if direct_url and (direct_url.endswith(".m3u8") or direct_url.endswith(".mp4") or direct_url.startswith("http")):
+                return {
+                    "url": direct_url,
+                    "headers": headers,
+                    "providerName": "VidLink",
+                    "qualities": [{"quality": "Auto", "url": direct_url}],
+                    "subtitles": []
+                }
+            raise HTTPException(status_code=404, detail="No sources found in VidLink response")
+            
+        qualities = []
+        for s in sources:
+            if not isinstance(s, dict):
+                continue
+            q = str(s.get("quality") or s.get("label") or "Auto")
+            u = str(s.get("url") or s.get("file") or s.get("src") or "")
+            if u:
+                qualities.append({"quality": q, "url": u})
+                
+        subtitles = []
+        subtitles_raw = sources_map.get("subtitles") or sources_map.get("tracks") or []
+        if isinstance(subtitles_raw, list):
+            for sub in subtitles_raw:
+                if not isinstance(sub, dict):
+                    continue
+                kind = str(sub.get("kind") or "")
+                if kind and kind != "captions" and kind != "subtitles":
+                    continue
+                sub_url = str(sub.get("url") or sub.get("file") or sub.get("src") or "")
+                lang = str(sub.get("lang") or sub.get("language") or sub.get("srclang") or "")
+                label = str(sub.get("label") or "")
+                if sub_url:
+                    subtitles.append({"url": sub_url, "lang": lang, "label": label})
+                    
+        def pick_best_source(sources_list):
+            quality_order = ["1080p", "720p", "480p", "360p", "Auto"]
+            best_url = None
+            best_rank = len(quality_order)
+            for s in sources_list:
+                if not isinstance(s, dict):
+                    continue
+                q = str(s.get("quality") or s.get("label") or "")
+                url = str(s.get("url") or s.get("file") or s.get("src") or "")
+                if not url:
+                    continue
+                if q in quality_order:
+                    rank = quality_order.index(q)
+                    if rank < best_rank:
+                        best_rank = rank
+                        best_url = url
+                else:
+                    if not best_url:
+                        best_url = url
+            return best_url
+            
+        stream_url = pick_best_source(sources)
+        if not stream_url:
+            if qualities:
+                best_url = qualities[0]["url"]
+                quality = qualities[0]["quality"]
+                return {
+                    "url": best_url,
+                    "headers": headers,
+                    "providerName": f"VidLink ({quality})",
+                    "qualities": qualities,
+                    "subtitles": subtitles
+                }
+            raise HTTPException(status_code=404, detail="No streamable URL found")
+            
+        def get_quality_label(sources_list, url):
+            for s in sources_list:
+                if isinstance(s, dict) and (s.get("url") == url or s.get("file") == url or s.get("src") == url):
+                    return str(s.get("quality") or s.get("label") or "")
+            return ""
+            
+        quality = get_quality_label(sources, stream_url)
+        return {
+            "url": stream_url,
+            "headers": headers,
+            "providerName": f"VidLink ({quality})" if quality else "VidLink",
+            "qualities": qualities,
+            "subtitles": subtitles
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"VidLink extraction error: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/api/extract/anime")
+async def extract_anime(
+    title: str,
+    episode: int,
+    season: int = 1
+):
+    if not title:
+        raise HTTPException(status_code=400, detail="Missing title")
+        
+    def sanitize_anime_title(t):
+        import re
+        clean = re.sub(r'\(.*?\)', '', t)
+        clean = re.sub(r'\[.*?\]', '', clean)
+        clean = re.sub(r'\s-\s.*', '', clean)
+        clean = re.sub(r'\b\d{4}\b', '', clean)
+        return clean.strip()
+        
+    sanitized = sanitize_anime_title(title)
+    search_title = f"{sanitized} Season {season}" if season > 1 else sanitized
+    
+    providers = ["gogoanime", "zoro"]
+    titles_to_try = [search_title, sanitized] if season > 1 else [sanitized]
+    
+    def try_single_flow(provider, q_title, ep_num):
+        try:
+            # 1. Search
+            encoded = urllib.parse.quote(q_title)
+            search_url = f"https://anineko.to/browser?keyword={encoded}"
+            r = requests.get(search_url, headers=ANINEKO_HEADERS, timeout=5)
+            if r.status_code != 200:
+                return None
+                
+            cards = re.findall(r'<a class="nv-anime-thumb nv-browse-thumb"[\s\S]*?</a>', r.text)
+            if not cards:
+                return None
+                
+            best_match_id = None
+            for card in cards:
+                id_m = re.search(r'href="/watch/([^"]+)"', card)
+                alt_m = re.search(r'alt="([^"]+)"', card)
+                if id_m:
+                    anime_id = id_m.group(1)
+                    anime_title = clean_anime_title(alt_m.group(1)) if alt_m else anime_id.replace('-', ' ').title()
+                    if anime_title.lower() == q_title.lower():
+                        best_match_id = anime_id
+                        break
+                        
+            if not best_match_id and cards:
+                id_m = re.search(r'href="/watch/([^"]+)"', cards[0])
+                if id_m:
+                    best_match_id = id_m.group(1)
+                    
+            if not best_match_id:
+                return None
+                
+            # 2. Episode list
+            info_url = f"https://anineko.to/watch/{best_match_id}"
+            r = requests.get(info_url, headers=ANINEKO_HEADERS, timeout=5)
+            if r.status_code != 200:
+                return None
+                
+            pattern = re.compile(
+                r'<a class="nv-info-episode-main" href="(?P<href>/watch/[^"]+/ep-(?P<num>\d+))">\s*'
+                r'<strong>Episode \d+</strong>\s*'
+                r'<span>(?P<title>[^<]+)</span>\s*'
+                r'</a>',
+                re.I
+            )
+            
+            episodes = []
+            for match in pattern.finditer(r.text):
+                ep_href = match.group('href').replace('/watch/', '')
+                ep_num_found = int(match.group('num'))
+                ep_title = clean_anime_title(match.group('title'))
+                episodes.append({
+                    "id": ep_href,
+                    "number": ep_num_found,
+                    "title": ep_title
+                })
+            
+            ep_obj = None
+            for ep in episodes:
+                if ep["number"] == ep_num:
+                    ep_obj = ep
+                    break
+            if not ep_obj and ep_num > 0 and ep_num <= len(episodes):
+                ep_obj = episodes[ep_num - 1]
+                
+            if not ep_obj:
+                return None
+                
+            # 3. Watch links
+            watch_url = f"https://anineko.to/watch/{ep_obj['id']}"
+            r = requests.get(watch_url, headers=ANINEKO_HEADERS, timeout=5)
+            if r.status_code != 200:
+                return None
+                
+            sources = []
+            subtitles = []
+            for btn in re.finditer(r'<button[^>]+data-video="(?P<url>[^"]+)"[^>]*>', r.text):
+                btn_html = btn.group(0)
+                video_url = btn.group('url')
+                if 'vibeplayer.site' in video_url:
+                    tab_match = re.search(r'data-tab="([^"]+)"', btn_html)
+                    tab = tab_match.group(1) if tab_match else 'tab_1'
+                    tab_label = "Sub"
+                    if tab == 'tab_0':
+                        tab_label = "Hardsub"
+                    elif tab == 'tab_2':
+                        tab_label = "Dub"
+                        
+                    parsed = urllib.parse.urlparse(video_url)
+                    vibe_id = parsed.path.strip('/')
+                    qs = urllib.parse.parse_qs(parsed.query)
+                    sub_url = qs.get('sub', [None])[0]
+                    if sub_url:
+                        subtitles.append({"url": sub_url, "lang": "English", "label": "English"})
+                        
+                    direct_stream = f"https://vibeplayer.site/public/stream/{vibe_id}/master.m3u8"
+                    tag_end = r.text.find('>', btn.start())
+                    btn_end = r.text.find('</button>', tag_end)
+                    btn_text = r.text[tag_end+1:btn_end].strip() if tag_end != -1 and btn_end != -1 else "HD"
+                    btn_text = re.sub(r'<[^>]+>', '', btn_text).strip()
+                    btn_text = ' '.join(btn_text.split())
+                    quality_label = f"{tab_label} ({btn_text})"
+                    sources.append({
+                        "url": direct_stream,
+                        "quality": quality_label,
+                        "isM3U8": True
+                    })
+            if not sources:
+                direct_matches = re.findall(r'vibeplayer\.site/([a-zA-Z0-9]+)', r.text)
+                for vibe_id in set(direct_matches):
+                    sources.append({
+                        "url": f"https://vibeplayer.site/public/stream/{vibe_id}/master.m3u8",
+                        "quality": "Backup HD",
+                        "isM3U8": True
+                    })
+                    
+            if not sources:
+                return None
+                
+            primary_url = sources[0]["url"]
+            qualities = [{"quality": s["quality"], "url": s["url"]} for s in sources]
+            
+            return {
+                "url": primary_url,
+                "headers": {
+                    "User-Agent": ANINEKO_HEADERS['User-Agent'],
+                    "Referer": "https://vibeplayer.site/"
+                },
+                "providerName": f"Consumet ({provider})",
+                "qualities": qualities,
+                "subtitles": subtitles
+            }
+        except Exception as e:
+            logger.error(f"Anime flow error {provider} / {q_title}: {e}")
+            return None
+            
+    # Run combinations
+    for t in titles_to_try:
+        for provider in providers:
+            res = try_single_flow(provider, t, episode)
+            if res:
+                return res
+                
+    raise HTTPException(status_code=404, detail="Anime stream not found")
+
 # ── Gradio UI ─────────────────────────────────────────────────────────────────
 def get_status_ui():
     lines = [f"### Status\n- **GDrive**: {'✅' if GDRIVE_SERVICE_ACCOUNT_JSON else '❌'}\n- **Gemini**: {'✅' if GEMINI_API_KEY else '❌'}\n- **Cache TTL**: {CACHE_EXPIRY_HOURS}h\n\n### Tasks\n"]

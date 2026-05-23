@@ -7,7 +7,6 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'torrentio_service.dart';
 import 'vegamovies_service.dart';
 import 'stremio_addon_service.dart';
-import 'consumet_service.dart';
 
 /// A single subtitle track from a provider
 class SubtitleInfo {
@@ -79,7 +78,6 @@ class StreamExtractorService {
   final _torrentioService = TorrentioService();
   final _vegaMoviesService = VegaMoviesService();
   final _stremioAddonService = StremioAddonService();
-  final _consumetService = ConsumetService();
 
   /// Track last successful provider per content for smarter ordering.
   /// Persisted to SharedPreferences across app restarts.
@@ -278,17 +276,20 @@ class StreamExtractorService {
         return extractVideasyDirect(tmdbId: tmdbId, title: title, type: type, imdbId: imdbId, season: season, episode: episode);
       case 'VidLink':
         return extractVidLinkDirect(tmdbId: tmdbId, type: type, season: season, episode: episode);
-      case 'VidFast':
-        return extractVidFastDirect(tmdbId: tmdbId, type: type, season: season, episode: episode);
-      case 'Vidsync':
-        return extractVidsyncDirect(tmdbId: tmdbId, type: type, season: season, episode: episode);
-      case 'Hexa':
-        return extractHexaDirect(tmdbId: tmdbId, type: type, season: season, episode: episode);
       case 'Consumet':
-        return _consumetService.extractAnimeStream(
-          title: title,
-          episode: episode,
-          season: season,
+        final envUrl = dotenv.env['HF_SPACE_URL'] ?? '';
+        final hfUrl = envUrl.isNotEmpty
+            ? (envUrl.endsWith('/') ? envUrl.substring(0, envUrl.length - 1) : envUrl)
+            : 'https://nikhil1776-torrentindex.hf.space';
+        return _fetchFromBackend(
+          hfUrl: hfUrl,
+          path: '/api/extract/anime',
+          params: {
+            'title': title,
+            'episode': '$episode',
+            'season': '$season',
+          },
+          providerName: 'Consumet',
         );
       case 'Torrentio':
         return _torrentioService.extractStream(
@@ -369,130 +370,71 @@ class StreamExtractorService {
     return null;
   }
 
-  // ── Videasy: tighter timeouts, smarter server fallback ──
+  // ── Backend API Helper ──
 
-  Future<ExtractedStream?> extractVideasyDirect({
-    required String tmdbId,
-    required String title,
-    required String type,
-    String imdbId = '',
-    int year = 0,
-    int season = 1,
-    int episode = 1,
+  Future<ExtractedStream?> _fetchFromBackend({
+    required String hfUrl,
+    required String path,
+    required Map<String, String> params,
+    required String providerName,
   }) async {
-    // Ordered by reliability — mb-flix is most stable
-    const servers = ['mb-flix', 'cdn', 'moviebox', 'hdmovie', '1movies', 'm4uhd'];
-
-    for (final server in servers) {
-      try {
-        debugPrint('[Extractor] 🔑 Videasy/$server for tmdb=$tmdbId "$title"');
-
-        final params = {
-          'title': title,
-          'mediaType': type == 'tv' ? 'tv' : 'movie',
-          'tmdbId': tmdbId,
-          if (imdbId.isNotEmpty) 'imdbId': imdbId,
-          if (year > 0) 'year': '$year',
-          if (type == 'tv') 'seasonId': '$season',
-          if (type == 'tv') 'episodeId': '$episode',
-        };
-
-        final uri = Uri.parse('https://api.videasy.net/$server/sources-with-title')
-            .replace(queryParameters: params);
-
-        // AGGRESSIVE timeout: 5s per server (was 8s)
-        final encResp = await http.get(uri, headers: {
-          'User-Agent': _ua,
-          'Referer': 'https://player.videasy.net/',
-          'Origin': 'https://player.videasy.net',
-        }).timeout(const Duration(seconds: 5));
-
-        if (encResp.statusCode != 200 || encResp.body.isEmpty) {
-          debugPrint('[Extractor] Videasy/$server returned ${encResp.statusCode}');
-          continue;
-        }
-
-        final encryptedBlob = encResp.body;
-        if (encryptedBlob.startsWith('{')) {
-          debugPrint('[Extractor] Videasy/$server returned JSON error');
-          continue;
-        }
-
-        debugPrint('[Extractor] 🔑 Videasy/$server got ${encryptedBlob.length} bytes encrypted');
-
-        // Decrypt — 6s timeout (was 10s)
-        final decResp = await http.post(
-          Uri.parse('https://enc-dec.app/api/dec-videasy'),
-          headers: {'Content-Type': 'application/json', 'User-Agent': _ua},
-          body: jsonEncode({'text': encryptedBlob, 'id': tmdbId}),
-        ).timeout(const Duration(seconds: 6));
-
-        if (decResp.statusCode != 200) {
-          debugPrint('[Extractor] enc-dec.app returned ${decResp.statusCode}');
-          continue;
-        }
-
-        final decData = jsonDecode(decResp.body);
-        if (decData['status'] != 200 || decData['result'] == null) {
-          debugPrint('[Extractor] enc-dec.app failed');
-          continue;
-        }
-
-        final result = decData['result'];
-        Map<String, dynamic> sourcesMap;
-        if (result is String) {
-          sourcesMap = jsonDecode(result) as Map<String, dynamic>;
-        } else if (result is Map) {
-          sourcesMap = Map<String, dynamic>.from(result);
-        } else {
-          continue;
-        }
-
-        final sources = sourcesMap['sources'];
-        if (sources is! List || sources.isEmpty) continue;
+    try {
+      final uri = Uri.parse('$hfUrl$path').replace(queryParameters: params);
+      final response = await http.get(uri).timeout(const Duration(seconds: 12));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body) as Map<String, dynamic>;
 
         final qualities = <QualityOption>[];
-        for (final s in sources) {
-          if (s is! Map) continue;
-          final q = s['quality']?.toString() ?? 'Auto';
-          final u = (s['url'] ?? s['file'] ?? '').toString();
-          if (u.isNotEmpty) qualities.add(QualityOption(quality: q, url: u));
-        }
-
-        final subs = <SubtitleInfo>[];
-        final subtitlesRaw = sourcesMap['subtitles'];
-        if (subtitlesRaw is List) {
-          for (final sub in subtitlesRaw) {
-            if (sub is! Map) continue;
-            final subUrl = (sub['url'] ?? sub['file'] ?? '').toString();
-            final lang = (sub['lang'] ?? sub['language'] ?? '').toString();
-            final label = (sub['label'] ?? '').toString();
-            if (subUrl.isNotEmpty) {
-              subs.add(SubtitleInfo(url: subUrl, lang: lang, label: label));
+        if (data['qualities'] is List) {
+          for (final q in data['qualities']) {
+            if (q is Map) {
+              qualities.add(QualityOption(
+                quality: q['quality']?.toString() ?? 'Auto',
+                url: q['url']?.toString() ?? '',
+              ));
             }
           }
         }
 
-        final streamUrl = _pickBestSource(sources);
-        if (streamUrl == null) continue;
+        final subtitles = <SubtitleInfo>[];
+        if (data['subtitles'] is List) {
+          for (final sub in data['subtitles']) {
+            if (sub is Map) {
+              subtitles.add(SubtitleInfo(
+                url: sub['url']?.toString() ?? '',
+                lang: sub['lang']?.toString() ?? 'English',
+                label: sub['label']?.toString() ?? '',
+              ));
+            }
+          }
+        }
 
-        final quality = _getQualityLabel(sources, streamUrl);
-        debugPrint('[Extractor] ✅ Videasy/$server → $quality, ${subs.length} subs');
-        return ExtractedStream(
-          url: streamUrl,
-          headers: {'Referer': 'https://player.videasy.net/', 'User-Agent': _ua},
-          providerName: 'Videasy/$server ${quality.isNotEmpty ? "($quality)" : ""}',
-          subtitles: subs,
-          qualities: qualities,
-        );
-      } catch (e) {
-        debugPrint('[Extractor] Videasy/$server failed: $e');
+        final Map<String, String> headers = {};
+        if (data['headers'] is Map) {
+          (data['headers'] as Map).forEach((k, v) {
+            headers[k.toString()] = v.toString();
+          });
+        }
+
+        final url = data['url']?.toString() ?? '';
+        if (url.isNotEmpty) {
+          return ExtractedStream(
+            url: url,
+            headers: headers,
+            providerName: data['providerName']?.toString() ?? providerName,
+            qualities: qualities,
+            subtitles: subtitles,
+            magnetUrl: data['magnetUrl']?.toString(),
+          );
+        }
       }
+    } catch (e) {
+      debugPrint('[Extractor] Backend fetch failed for $providerName: $e');
     }
     return null;
   }
 
-  // ── VidAPI: unchanged (works great per user) ──
+  // ── Scraper Delegates ──
 
   Future<ExtractedStream?> extractVidAPIDirect({
     required String imdbId,
@@ -501,103 +443,52 @@ class StreamExtractorService {
     int season = 1,
     int episode = 1,
   }) async {
-    try {
-      debugPrint('[Extractor] 🎯 VidAPI direct for imdb=$imdbId tmdb=$tmdbId');
-
-      final params = <String, String>{};
-      if (imdbId.isNotEmpty && imdbId.startsWith('tt')) {
-        params['imdb'] = imdbId;
-      } else if (tmdbId.isNotEmpty && tmdbId != '0') {
-        params['tmdb'] = tmdbId;
-      } else {
-        return null;
-      }
-      params['type'] = type == 'tv' ? 'tv' : 'movie';
-      if (type == 'tv') {
-        params['season'] = '$season';
-        params['episode'] = '$episode';
-      }
-
-      final uri = Uri.parse('https://streamdata.vaplayer.ru/api.php')
-          .replace(queryParameters: params);
-
-      final resp = await http.get(uri, headers: {
-        'User-Agent': _ua,
-        'Referer': 'https://brightpathsignals.com/',
-        'Origin': 'https://brightpathsignals.com',
-      }).timeout(const Duration(seconds: 8));
-
-      if (resp.statusCode != 200) {
-        debugPrint('[Extractor] VidAPI returned ${resp.statusCode}');
-        return null;
-      }
-
-      final data = jsonDecode(resp.body);
-      final statusCode = data['status_code']?.toString();
-      if (statusCode != '200' || data['data'] == null) {
-        debugPrint('[Extractor] VidAPI status: $statusCode');
-        return null;
-      }
-
-      final streamData = data['data'] as Map<String, dynamic>;
-      final streamUrls = streamData['stream_urls'];
-
-      if (streamUrls is List && streamUrls.isNotEmpty) {
-        const qualityLabels = ['1080p', '720p', '480p', 'SD'];
-        final qualities = <QualityOption>[];
-        for (int i = 0; i < streamUrls.length; i++) {
-          final u = streamUrls[i].toString();
-          if (u.isEmpty) continue;
-          final label = i < qualityLabels.length ? qualityLabels[i] : 'Stream ${i + 1}';
-          qualities.add(QualityOption(quality: label, url: u));
-        }
-
-        final subs = <SubtitleInfo>[];
-        final defaultSubs = data['default_subs'];
-        if (defaultSubs is List) {
-          for (final sub in defaultSubs) {
-            if (sub is! Map) continue;
-            final subUrl = (sub['url'] ?? sub['file'] ?? '').toString();
-            final lang = (sub['lang'] ?? sub['label'] ?? '').toString();
-            if (subUrl.isNotEmpty) {
-              subs.add(SubtitleInfo(url: subUrl, lang: lang));
-            }
-          }
-        }
-
-        final url = streamUrls[0].toString();
-        if (url.contains('.m3u8') || url.contains('.mp4')) {
-          final title = streamData['title']?.toString() ?? '';
-          debugPrint('[Extractor] ✅ VidAPI → $title, ${qualities.length} qualities, ${subs.length} subs');
-          return ExtractedStream(
-            url: url,
-            headers: {
-              'Referer': 'https://brightpathsignals.com/',
-              'Origin': 'https://brightpathsignals.com',
-              'User-Agent': _ua,
-            },
-            providerName: 'VidAPI (HD)',
-            subtitles: subs,
-            qualities: qualities,
-          );
-        }
-      }
-
-      final file = streamData['file'] ?? streamData['url'] ?? streamData['stream_url'];
-      if (file is String && file.isNotEmpty) {
-        return ExtractedStream(
-          url: file,
-          headers: {'Referer': 'https://brightpathsignals.com/', 'User-Agent': _ua},
-          providerName: 'VidAPI',
-        );
-      }
-    } catch (e) {
-      debugPrint('[Extractor] VidAPI direct failed: $e');
-    }
-    return null;
+    final envUrl = dotenv.env['HF_SPACE_URL'] ?? '';
+    final hfUrl = envUrl.isNotEmpty
+        ? (envUrl.endsWith('/') ? envUrl.substring(0, envUrl.length - 1) : envUrl)
+        : 'https://nikhil1776-torrentindex.hf.space';
+    return _fetchFromBackend(
+      hfUrl: hfUrl,
+      path: '/api/extract/vidapi',
+      params: {
+        if (imdbId.isNotEmpty) 'imdb': imdbId,
+        if (tmdbId.isNotEmpty) 'tmdb': tmdbId,
+        'type': type,
+        'season': '$season',
+        'episode': '$episode',
+      },
+      providerName: 'VidAPI',
+    );
   }
 
-  // ── VidLink: uses enc-dec.app encryption API ──────────────────────────────
+  Future<ExtractedStream?> extractVideasyDirect({
+    required String tmdbId,
+    required String title,
+    required String type,
+    String imdbId = '',
+    int season = 1,
+    int episode = 1,
+    int year = 0,
+  }) async {
+    final envUrl = dotenv.env['HF_SPACE_URL'] ?? '';
+    final hfUrl = envUrl.isNotEmpty
+        ? (envUrl.endsWith('/') ? envUrl.substring(0, envUrl.length - 1) : envUrl)
+        : 'https://nikhil1776-torrentindex.hf.space';
+    return _fetchFromBackend(
+      hfUrl: hfUrl,
+      path: '/api/extract/videasy',
+      params: {
+        'tmdb': tmdbId,
+        'title': title,
+        'type': type,
+        if (imdbId.isNotEmpty) 'imdb': imdbId,
+        'season': '$season',
+        'episode': '$episode',
+        if (year > 0) 'year': '$year',
+      },
+      providerName: 'Videasy',
+    );
+  }
 
   Future<ExtractedStream?> extractVidLinkDirect({
     required String tmdbId,
@@ -605,257 +496,21 @@ class StreamExtractorService {
     int season = 1,
     int episode = 1,
   }) async {
-    if (tmdbId.isEmpty || tmdbId == '0') return null;
-
-    try {
-      debugPrint('[Extractor] 🎯 VidLink (enc-dec) for tmdb=$tmdbId');
-
-      // Step 1: Encrypt the TMDB ID via enc-dec.app
-      final encResp = await http.get(
-        Uri.parse('https://enc-dec.app/api/enc-vidlink?text=$tmdbId'),
-        headers: {'User-Agent': _ua},
-      ).timeout(const Duration(seconds: 5));
-
-      if (encResp.statusCode != 200) {
-        debugPrint('[Extractor] VidLink enc-dec returned ${encResp.statusCode}');
-        return null;
-      }
-
-      final encData = jsonDecode(encResp.body);
-      if (encData['status'] != 200 || encData['result'] == null) {
-        debugPrint('[Extractor] VidLink enc-dec failed: ${encData['error'] ?? 'unknown'}');
-        return null;
-      }
-
-      final encryptedId = encData['result'].toString();
-      debugPrint('[Extractor] 🔑 VidLink encrypted ID: ${encryptedId.substring(0, 20)}...');
-
-      // Step 2: Fetch stream sources from VidLink API using encrypted ID
-      final apiPath = type == 'tv'
-          ? '/api/b/tv/$encryptedId/$season/$episode'
-          : '/api/b/movie/$encryptedId';
-
-      final sourceResp = await http.get(
-        Uri.parse('https://vidlink.pro$apiPath'),
-        headers: {
-          'User-Agent': _ua,
-          'Origin': 'https://vidlink.pro',
-          'Referer': 'https://vidlink.pro/',
-        },
-      ).timeout(const Duration(seconds: 6));
-
-      if (sourceResp.statusCode != 200) {
-        debugPrint('[Extractor] VidLink source API returned ${sourceResp.statusCode}');
-        return null;
-      }
-
-      // Step 3: Parse the response — can be JSON with sources array
-      return _parseEncDecSourceResponse(
-        sourceResp.body,
-        providerName: 'VidLink',
-        referer: 'https://vidlink.pro/',
-      );
-    } catch (e) {
-      debugPrint('[Extractor] VidLink failed: $e');
-    }
-    return null;
-  }
-
-  // ── VidFast: uses enc-dec.app ─────────────────────────────────────────────
-
-  Future<ExtractedStream?> extractVidFastDirect({
-    required String tmdbId,
-    required String type,
-    int season = 1,
-    int episode = 1,
-  }) async {
-    // Disabled: VidFast provider is permanently offline/broken.
-    return null;
-  }
-
-  // ── Vidsync: uses enc-dec.app ─────────────────────────────────────────────
-
-  Future<ExtractedStream?> extractVidsyncDirect({
-    required String tmdbId,
-    required String type,
-    int season = 1,
-    int episode = 1,
-  }) async {
-    // Disabled: Vidsync provider is permanently offline/broken.
-    return null;
-  }
-
-  // ── Hexa: uses enc-dec.app ────────────────────────────────────────────────
-
-  Future<ExtractedStream?> extractHexaDirect({
-    required String tmdbId,
-    required String type,
-    int season = 1,
-    int episode = 1,
-  }) async {
-    // Disabled: Hexa provider is permanently offline/broken.
-    return null;
-  }
-
-  // ── Shared enc-dec.app response parser ─────────────────────────────────────
-
-  ExtractedStream? _parseEncDecSourceResponse(
-    String responseBody, {
-    required String providerName,
-    required String referer,
-  }) {
-    try {
-      final data = jsonDecode(responseBody);
-
-      // Handle enc-dec.app wrapper: {"status": 200, "result": ...}
-      Map<String, dynamic> sourcesMap;
-      if (data is Map && data.containsKey('status')) {
-        if (data['status'] != 200 || data['result'] == null) {
-          debugPrint('[Extractor] $providerName enc-dec status != 200');
-          return null;
-        }
-        final result = data['result'];
-        if (result is String) {
-          sourcesMap = jsonDecode(result) as Map<String, dynamic>;
-        } else if (result is Map) {
-          sourcesMap = Map<String, dynamic>.from(result);
-        } else {
-          return null;
-        }
-      } else if (data is Map) {
-        sourcesMap = Map<String, dynamic>.from(data);
-      } else {
-        return null;
-      }
-
-      // Parse sources array
-      final sources = sourcesMap['sources'] ?? sourcesMap['data'];
-      if (sources is! List || sources.isEmpty) {
-        // Try VidLink new structure: {"stream": {"playlist": "..."}}
-        if (sourcesMap.containsKey('stream') && sourcesMap['stream'] is Map) {
-          final streamMap = sourcesMap['stream'] as Map<String, dynamic>;
-          final directUrl = (streamMap['playlist'] ?? streamMap['url'] ?? streamMap['file'] ?? '').toString();
-          if (directUrl.isNotEmpty) {
-            final subs = <SubtitleInfo>[];
-            final captionsRaw = streamMap['captions'] ?? streamMap['subtitles'] ?? streamMap['tracks'];
-            if (captionsRaw is List) {
-              for (final sub in captionsRaw) {
-                if (sub is! Map) continue;
-                final subUrl = (sub['url'] ?? sub['file'] ?? sub['src'] ?? '').toString();
-                final lang = (sub['language'] ?? sub['lang'] ?? sub['label'] ?? '').toString();
-                final label = (sub['label'] ?? '').toString();
-                if (subUrl.isNotEmpty) {
-                  subs.add(SubtitleInfo(url: subUrl, lang: lang, label: label));
-                }
-              }
-            }
-            debugPrint('[Extractor] ✅ $providerName (stream mapping) → $directUrl, ${subs.length} subs');
-            return ExtractedStream(
-              url: directUrl,
-              headers: {'Referer': referer, 'User-Agent': _ua},
-              providerName: providerName,
-              subtitles: subs,
-            );
-          }
-        }
-
-        // Try flat structure: {"url": "...", "file": "..."}
-        final directUrl = (sourcesMap['url'] ?? sourcesMap['file'] ?? sourcesMap['stream_url'] ?? '').toString();
-        if (directUrl.isNotEmpty && (directUrl.contains('.m3u8') || directUrl.contains('.mp4') || directUrl.startsWith('http'))) {
-          return ExtractedStream(
-            url: directUrl,
-            headers: {'Referer': referer, 'User-Agent': _ua},
-            providerName: providerName,
-          );
-        }
-        return null;
-      }
-
-      final qualities = <QualityOption>[];
-      for (final s in sources) {
-        if (s is! Map) continue;
-        final q = (s['quality'] ?? s['label'] ?? 'Auto').toString();
-        final u = (s['url'] ?? s['file'] ?? s['src'] ?? '').toString();
-        if (u.isNotEmpty) qualities.add(QualityOption(quality: q, url: u));
-      }
-
-      final subs = <SubtitleInfo>[];
-      final subtitlesRaw = sourcesMap['subtitles'] ?? sourcesMap['tracks'];
-      if (subtitlesRaw is List) {
-        for (final sub in subtitlesRaw) {
-          if (sub is! Map) continue;
-          final kind = (sub['kind'] ?? '').toString();
-          if (kind.isNotEmpty && kind != 'captions' && kind != 'subtitles') continue;
-          final subUrl = (sub['url'] ?? sub['file'] ?? sub['src'] ?? '').toString();
-          final lang = (sub['lang'] ?? sub['language'] ?? sub['srclang'] ?? '').toString();
-          final label = (sub['label'] ?? '').toString();
-          if (subUrl.isNotEmpty) {
-            subs.add(SubtitleInfo(url: subUrl, lang: lang, label: label));
-          }
-        }
-      }
-
-      final streamUrl = _pickBestSource(sources);
-      if (streamUrl == null) {
-        if (qualities.isNotEmpty) {
-          final bestUrl = qualities.first.url;
-          final quality = qualities.first.quality;
-          debugPrint('[Extractor] ✅ $providerName → $quality, ${subs.length} subs');
-          return ExtractedStream(
-            url: bestUrl,
-            headers: {'Referer': referer, 'User-Agent': _ua},
-            providerName: '$providerName ($quality)',
-            subtitles: subs,
-            qualities: qualities,
-          );
-        }
-        return null;
-      }
-
-      final quality = _getQualityLabel(sources, streamUrl);
-      debugPrint('[Extractor] ✅ $providerName → $quality, ${subs.length} subs');
-      return ExtractedStream(
-        url: streamUrl,
-        headers: {'Referer': referer, 'User-Agent': _ua},
-        providerName: '$providerName${quality.isNotEmpty ? " ($quality)" : ""}',
-        subtitles: subs,
-        qualities: qualities,
-      );
-    } catch (e) {
-      debugPrint('[Extractor] $providerName parse failed: $e');
-      return null;
-    }
-  }
-
-  // ── Quality picker helpers ──
-
-  String? _pickBestSource(List sources) {
-    const qualityOrder = ['1080p', '720p', '480p', '360p', 'Auto'];
-    String? bestUrl;
-    int bestRank = qualityOrder.length;
-    for (final s in sources) {
-      if (s is! Map) continue;
-      final q = s['quality']?.toString() ?? '';
-      final url = (s['url'] ?? s['file'] ?? '').toString();
-      if (url.isEmpty) continue;
-      final rank = qualityOrder.indexOf(q);
-      if (rank >= 0 && rank < bestRank) {
-        bestRank = rank;
-        bestUrl = url;
-      } else {
-        bestUrl ??= url;
-      }
-    }
-    return bestUrl;
-  }
-
-  String _getQualityLabel(List sources, String url) {
-    for (final s in sources) {
-      if (s is Map && (s['url'] == url || s['file'] == url)) {
-        return s['quality']?.toString() ?? '';
-      }
-    }
-    return '';
+    final envUrl = dotenv.env['HF_SPACE_URL'] ?? '';
+    final hfUrl = envUrl.isNotEmpty
+        ? (envUrl.endsWith('/') ? envUrl.substring(0, envUrl.length - 1) : envUrl)
+        : 'https://nikhil1776-torrentindex.hf.space';
+    return _fetchFromBackend(
+      hfUrl: hfUrl,
+      path: '/api/extract/vidlink',
+      params: {
+        'tmdb': tmdbId,
+        'type': type,
+        'season': '$season',
+        'episode': '$episode',
+      },
+      providerName: 'VidLink',
+    );
   }
 
   /// Legacy race API — now delegates to sequential with status reporting
