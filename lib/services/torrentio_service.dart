@@ -246,10 +246,11 @@ class TorrentioService {
     if (infoHash.isEmpty) return null;
 
     // Webtor CDN mirrors — try each in parallel
+    // NOTE: dq4w8c.webtor.io removed — DNS no longer resolves
     const mirrors = [
-      'https://dq4w8c.webtor.io',
-      'https://hx22fl.webtor.io',
       'https://webtor.io',
+      'https://hx22fl.webtor.io',
+      'https://d1cqf6has1dkc0.webtor.io',
     ];
 
     const trackers =

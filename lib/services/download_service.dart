@@ -407,7 +407,7 @@ class DownloadService extends ChangeNotifier {
         final downloadedFile = File(filePath);
         if (await downloadedFile.exists()) {
           final fileSize = await downloadedFile.length();
-          if (fileSize < 100 * 1024) {  // < 100KB
+          if (fileSize < 1000 * 1024) {  // < 100KB
             debugPrint('[DownloadService] Downloaded file is only ${fileSize}B — likely not a video');
             await downloadedFile.delete();
             await _failTask(task, 'Downloaded file is too small (${(fileSize / 1024).toStringAsFixed(1)}KB). The link may be expired or invalid.');
