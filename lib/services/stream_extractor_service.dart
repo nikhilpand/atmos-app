@@ -79,6 +79,11 @@ class StreamExtractorService {
   final _vegaMoviesService = VegaMoviesService();
   final _stremioAddonService = StremioAddonService();
 
+  /// Whether we've already woken up the HF Space this session.
+  bool _hfSpaceAwake = false;
+  /// Completer to avoid concurrent wake-up calls.
+  Completer<bool>? _hfWakeCompleter;
+
   /// Track last successful provider per content for smarter ordering.
   /// Persisted to SharedPreferences across app restarts.
   final _lastSuccessful = <String, String>{};
@@ -248,11 +253,12 @@ class StreamExtractorService {
       });
     }
 
-    // Global timeout — if nothing responds in 15s, give up
+    // Global timeout — if nothing responds in 25s, give up.
+    // Increased from 15s to account for HF Space cold-starts (can take 10-20s).
     return completer.future.timeout(
-      const Duration(seconds: 15),
+      const Duration(seconds: 25),
       onTimeout: () {
-        debugPrint('[Extractor] Global timeout — no provider responded');
+        debugPrint('[Extractor] Global timeout (25s) — no provider responded');
         if (!completer.isCompleted) completer.complete(null);
         return null;
       },
@@ -279,12 +285,8 @@ class StreamExtractorService {
         return extractVidLinkDirect(tmdbId: tmdbId, type: type, season: season, episode: episode);
       case 'Consumet':
         if (title.isEmpty) return null; // title required for anime search
-        final envUrl = dotenv.env['HF_SPACE_URL'] ?? '';
-        final hfUrl = envUrl.isNotEmpty
-            ? (envUrl.endsWith('/') ? envUrl.substring(0, envUrl.length - 1) : envUrl)
-            : 'https://nikhil1776-torrentindex.hf.space';
         return _fetchFromBackend(
-          hfUrl: hfUrl,
+          hfUrl: _hfBaseUrl,
           path: '/api/extract/anime',
           params: {
             'title': title,
@@ -358,16 +360,21 @@ class StreamExtractorService {
         'imdb': imdbId, 'tmdb': tmdbId, 'type': type,
         'season': '$season', 'episode': '$episode',
       });
+      // Increased from 5s→8s to account for network latency + worker resolver races
       final response = await http.get(uri, headers: {'User-Agent': _ua})
-          .timeout(const Duration(seconds: 5));
+          .timeout(const Duration(seconds: 8));
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         if (data['success'] == true && data['url'] != null) {
+          debugPrint('[Extractor] ✅ Worker resolved via ${data['provider']}: ${data['url']}');
           return ExtractedStream(
             url: data['url'], providerName: data['provider'] ?? 'worker',
             headers: {'User-Agent': _ua, if (data['headers']?['Referer'] != null) 'Referer': data['headers']['Referer']},
           );
         }
+        debugPrint('[Extractor] Worker returned success=false: ${data['error'] ?? 'unknown'}');
+      } else {
+        debugPrint('[Extractor] Worker HTTP ${response.statusCode}');
       }
     } catch (e) { debugPrint('[Extractor] Worker failed: $e'); }
     return null;
@@ -375,15 +382,70 @@ class StreamExtractorService {
 
   // ── Backend API Helper ──
 
+  /// Helper: get HF Space base URL.
+  String get _hfBaseUrl {
+    final envUrl = dotenv.env['HF_SPACE_URL'] ?? '';
+    if (envUrl.isNotEmpty) {
+      return envUrl.endsWith('/') ? envUrl.substring(0, envUrl.length - 1) : envUrl;
+    }
+    return 'https://nikhil1776-torrentindex.hf.space';
+  }
+
+  /// Wake up the HuggingFace Space if it might be sleeping.
+  /// Only runs once per session. Returns true if space is reachable.
+  Future<bool> _ensureHfSpaceAwake() async {
+    if (_hfSpaceAwake) return true;
+
+    // Prevent concurrent wake-up attempts
+    if (_hfWakeCompleter != null) return _hfWakeCompleter!.future;
+    _hfWakeCompleter = Completer<bool>();
+
+    try {
+      debugPrint('[Extractor] Waking up HF Space...');
+      for (int attempt = 0; attempt < 3; attempt++) {
+        try {
+          final resp = await http.get(
+            Uri.parse('$_hfBaseUrl/api/health'),
+            headers: {'User-Agent': _ua},
+          ).timeout(Duration(seconds: attempt == 0 ? 5 : 10));
+          if (resp.statusCode == 200) {
+            debugPrint('[Extractor] ✅ HF Space is awake (attempt ${attempt + 1})');
+            _hfSpaceAwake = true;
+            _hfWakeCompleter!.complete(true);
+            _hfWakeCompleter = null;
+            return true;
+          }
+        } catch (e) {
+          debugPrint('[Extractor] HF wake attempt ${attempt + 1}/3 failed: $e');
+        }
+        if (attempt < 2) {
+          await Future.delayed(const Duration(seconds: 3));
+        }
+      }
+      debugPrint('[Extractor] ⚠️ HF Space did not respond after 3 attempts');
+      _hfWakeCompleter!.complete(false);
+      _hfWakeCompleter = null;
+      return false;
+    } catch (e) {
+      _hfWakeCompleter!.complete(false);
+      _hfWakeCompleter = null;
+      return false;
+    }
+  }
+
   Future<ExtractedStream?> _fetchFromBackend({
     required String hfUrl,
     required String path,
     required Map<String, String> params,
     required String providerName,
   }) async {
+    // Ensure HF Space is awake before making API calls
+    await _ensureHfSpaceAwake();
+
     try {
       final uri = Uri.parse('$hfUrl$path').replace(queryParameters: params);
-      final response = await http.get(uri).timeout(const Duration(seconds: 12));
+      // Increased timeout from 12s→18s to handle HF Space latency
+      final response = await http.get(uri).timeout(const Duration(seconds: 18));
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body) as Map<String, dynamic>;
 
@@ -421,6 +483,7 @@ class StreamExtractorService {
 
         final url = data['url']?.toString() ?? '';
         if (url.isNotEmpty) {
+          debugPrint('[Extractor] ✅ $providerName resolved: $url');
           return ExtractedStream(
             url: url,
             headers: headers,
@@ -430,9 +493,11 @@ class StreamExtractorService {
             magnetUrl: data['magnetUrl']?.toString(),
           );
         }
+      } else {
+        debugPrint('[Extractor] $providerName: HF returned HTTP ${response.statusCode}');
       }
     } catch (e) {
-      debugPrint('[Extractor] Backend fetch failed for $providerName: $e');
+      debugPrint('[Extractor] $providerName backend fetch failed: $e');
     }
     return null;
   }
@@ -446,12 +511,8 @@ class StreamExtractorService {
     int season = 1,
     int episode = 1,
   }) async {
-    final envUrl = dotenv.env['HF_SPACE_URL'] ?? '';
-    final hfUrl = envUrl.isNotEmpty
-        ? (envUrl.endsWith('/') ? envUrl.substring(0, envUrl.length - 1) : envUrl)
-        : 'https://nikhil1776-torrentindex.hf.space';
     return _fetchFromBackend(
-      hfUrl: hfUrl,
+      hfUrl: _hfBaseUrl,
       path: '/api/extract/vidapi',
       params: {
         if (imdbId.isNotEmpty) 'imdb': imdbId,
@@ -473,12 +534,8 @@ class StreamExtractorService {
     int episode = 1,
     int year = 0,
   }) async {
-    final envUrl = dotenv.env['HF_SPACE_URL'] ?? '';
-    final hfUrl = envUrl.isNotEmpty
-        ? (envUrl.endsWith('/') ? envUrl.substring(0, envUrl.length - 1) : envUrl)
-        : 'https://nikhil1776-torrentindex.hf.space';
     return _fetchFromBackend(
-      hfUrl: hfUrl,
+      hfUrl: _hfBaseUrl,
       path: '/api/extract/videasy',
       params: {
         'tmdb': tmdbId,
@@ -499,12 +556,8 @@ class StreamExtractorService {
     int season = 1,
     int episode = 1,
   }) async {
-    final envUrl = dotenv.env['HF_SPACE_URL'] ?? '';
-    final hfUrl = envUrl.isNotEmpty
-        ? (envUrl.endsWith('/') ? envUrl.substring(0, envUrl.length - 1) : envUrl)
-        : 'https://nikhil1776-torrentindex.hf.space';
     return _fetchFromBackend(
-      hfUrl: hfUrl,
+      hfUrl: _hfBaseUrl,
       path: '/api/extract/vidlink',
       params: {
         'tmdb': tmdbId,

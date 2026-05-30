@@ -283,6 +283,8 @@ class DownloadService extends ChangeNotifier {
     for (int attempt = 0; attempt <= maxRetries; attempt++) {
       try {
         final client = HttpClient();
+        // Follow redirects automatically (some CDNs 302-redirect)
+        client.autoUncompress = true;
         
         // Build filename
         final safeTitle = task.title.replaceAll(RegExp(r'[^\w\s-]'), '').replaceAll(' ', '_');
@@ -297,16 +299,33 @@ class DownloadService extends ChangeNotifier {
         if (await file.exists()) {
           startByte = await file.length();
         }
+        final isResume = startByte > 0;
 
         var currentUrl = url;
         HttpClientResponse response;
-        var request = await client.getUrl(Uri.parse(currentUrl));
-        headers.forEach((k, v) => request.headers.set(k, v));
-        if (startByte > 0) {
-          request.headers.set('Range', 'bytes=$startByte-');
-          debugPrint('[DownloadService] Resuming from byte $startByte');
+        int redirectCount = 0;
+
+        while (true) {
+          final request = await client.getUrl(Uri.parse(currentUrl));
+          request.followRedirects = false;
+          headers.forEach((k, v) => request.headers.set(k, v));
+          if (isResume) {
+            request.headers.set('Range', 'bytes=$startByte-');
+            debugPrint('[DownloadService] Resuming from byte $startByte');
+          }
+          response = await request.close();
+
+          if (response.statusCode >= 300 && response.statusCode < 400 && redirectCount < 8) {
+            final location = response.headers.value('location');
+            if (location != null) {
+              currentUrl = _resolveUrl(currentUrl, location);
+              redirectCount++;
+              debugPrint('[DownloadService] Following redirect $redirectCount to $currentUrl');
+              continue;
+            }
+          }
+          break;
         }
-        response = await request.close();
 
         // ── Google Drive virus warning bypass ──
         final contentType = response.headers.contentType?.toString() ?? '';
@@ -339,16 +358,25 @@ class DownloadService extends ChangeNotifier {
           await _failTask(task, 'PixelDrain returned HTML error page.');
           return;
         } else if (contentType.contains('text/html')) {
-          // Generic catch-all: any other source returning HTML is a redirect/error page,
-          // not a video file. This prevents "instant download" of tiny HTML files.
-          client.close();
-          final host = Uri.tryParse(currentUrl)?.host ?? 'unknown';
-          await _failTask(task, 'Server ($host) returned an HTML page instead of a video file. The download link may have expired or needs resolving.');
-          return;
+          // Check content length — if the response is large (>500KB), it might be
+          // a mislabeled video file from a CDN. Only reject small HTML responses.
+          final declaredLength = response.contentLength;
+          if (declaredLength > 0 && declaredLength < 500 * 1024) {
+            client.close();
+            final host = Uri.tryParse(currentUrl)?.host ?? 'unknown';
+            await _failTask(task, 'Server ($host) returned an HTML page (${(declaredLength / 1024).toStringAsFixed(0)}KB) instead of a video file. The download link may have expired or needs resolving.');
+            return;
+          } else if (declaredLength <= 0) {
+            // Unknown length with text/html — peek at the first bytes to decide
+            // We'll allow it to proceed; the size check at the end will catch errors
+            debugPrint('[DownloadService] Warning: text/html content-type with unknown length from ${Uri.tryParse(currentUrl)?.host}, attempting download anyway');
+          }
+          // If declaredLength > 500KB with text/html, let it proceed — likely mislabeled video
         }
 
         if (response.statusCode != 200 && response.statusCode != 206) {
-          await _failTask(task, 'HTTP ${response.statusCode}');
+          final host = Uri.tryParse(currentUrl)?.host ?? 'unknown';
+          await _failTask(task, 'Server ($host) returned HTTP ${response.statusCode}. The download link may have expired.');
           client.close();
           return;
         }
@@ -404,14 +432,17 @@ class DownloadService extends ChangeNotifier {
         // ── Minimum size sanity check ──
         // A real video file should be at least 100KB.
         // If it's smaller, it's almost certainly an error/redirect page.
-        final downloadedFile = File(filePath);
-        if (await downloadedFile.exists()) {
-          final fileSize = await downloadedFile.length();
-          if (fileSize < 1000 * 1024) {  // < 100KB
-            debugPrint('[DownloadService] Downloaded file is only ${fileSize}B — likely not a video');
-            await downloadedFile.delete();
-            await _failTask(task, 'Downloaded file is too small (${(fileSize / 1024).toStringAsFixed(1)}KB). The link may be expired or invalid.');
-            return;
+        // Skip this check for resumed downloads where we only fetched the tail end.
+        if (!isResume) {
+          final downloadedFile = File(filePath);
+          if (await downloadedFile.exists()) {
+            final fileSize = await downloadedFile.length();
+            if (fileSize < 100 * 1024) {  // < 100KB (was incorrectly 1000*1024 = 976KB)
+              debugPrint('[DownloadService] Downloaded file is only ${fileSize}B — likely not a video');
+              await downloadedFile.delete();
+              await _failTask(task, 'Downloaded file is too small (${(fileSize / 1024).toStringAsFixed(1)}KB). The link may be expired or invalid.');
+              return;
+            }
           }
         }
 

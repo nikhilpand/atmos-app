@@ -146,6 +146,17 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
       if (mounted) setState(() => _isBuffering = buffering);
     });
 
+    // Listen for player errors
+    _player.stream.error.listen((error) {
+      debugPrint('[Player] Native player error: $error');
+      if (mounted) {
+        setState(() {
+          _state = _ExState.failed;
+          _failedMsg = 'Playback error: $error';
+        });
+      }
+    });
+
     // U11: Local file fast-path — bypass all stream extraction
     final isLocal = widget.args['isLocal'] == true;
     final localPath = widget.args['localPath'] as String?;
@@ -882,6 +893,14 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
           await platform.setProperty('referrer', referer);
           debugPrint('[Player] Set mpv referrer: $referer');
         }
+        // Set all HTTP headers globally via http-header-fields to ensure segment/sub requests get them
+        final headersString = stream.headers.entries
+            .map((e) => '${e.key}: ${e.value}')
+            .join(',');
+        if (headersString.isNotEmpty) {
+          await platform.setProperty('http-header-fields', headersString);
+          debugPrint('[Player] Set mpv http-header-fields: $headersString');
+        }
       } catch (e) {
         debugPrint('[Player] Failed setting HTTP properties on native player: $e');
       }
@@ -1070,7 +1089,7 @@ class _NativePlayerScreenState extends ConsumerState<NativePlayerScreen> {
         await platform.setProperty('demuxer-max-back-bytes', '67108864'); // 64 MB seek-back buffer
         await platform.setProperty('cache-secs', '180'); // 3 minutes buffer
         await platform.setProperty('demuxer-readahead-secs', '180'); // 3 minutes read-ahead
-        await platform.setProperty('hwdec', 'mediacodec-copy'); // Android MediaCodec hardware acceleration
+        await platform.setProperty('hwdec', 'auto'); // Android MediaCodec hardware acceleration
         await platform.setProperty('network-timeout', '30'); // 30 seconds network timeout
         await platform.setProperty('demuxer-lavf-probesize', '5000000');
         await platform.setProperty('demuxer-lavf-analyzeduration', '5000000');

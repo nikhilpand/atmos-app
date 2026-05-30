@@ -29,12 +29,13 @@ const timeoutPromise = (promise, ms, name) => {
 };
 
 async function raceResolvers(imdbId, tmdbId, type, season, episode) {
+  const errors = [];
   const promises = RESOLVERS.map(async (resolver) => {
     try {
       console.log(`[Extract] Starting ${resolver.name}...`);
       const result = await timeoutPromise(
         resolver.resolve(imdbId, tmdbId, type, season, episode),
-        4000,
+        6000,  // Increased from 4s→6s to reduce false timeouts on slow APIs
         resolver.name
       );
       if (result && result.url) {
@@ -43,6 +44,7 @@ async function raceResolvers(imdbId, tmdbId, type, season, episode) {
       throw new Error(`${resolver.name} returned empty result`);
     } catch (e) {
       console.log(`[Extract] ${resolver.name} failed: ${e.message}`);
+      errors.push(`${resolver.name}: ${e.message}`);
       throw e;
     }
   });
@@ -51,7 +53,7 @@ async function raceResolvers(imdbId, tmdbId, type, season, episode) {
     return await Promise.any(promises);
   } catch (err) {
     // All promises rejected
-    return null;
+    return { errors };
   }
 }
 
@@ -474,7 +476,7 @@ export default {
       }
 
       const raceResult = await raceResolvers(imdbId, tmdbId, type, season, episode);
-      if (raceResult) {
+      if (raceResult && raceResult.resolver) {
         const { resolver, result } = raceResult;
         const proxyUrl = `${url.origin}/proxy?url=${encodeURIComponent(result.url)}&referer=${encodeURIComponent(result.referer || '')}`;
         console.log(`[Extract] ✅ ${resolver.name} won the race → ${result.url}`);
@@ -489,7 +491,12 @@ export default {
         }), { headers: corsHeaders });
       }
 
-      return new Response(JSON.stringify({ success: false, error: 'All providers exhausted' }), {
+      const errorDetails = raceResult?.errors || ['All providers returned empty results'];
+      return new Response(JSON.stringify({
+        success: false,
+        error: 'All providers exhausted',
+        details: errorDetails,
+      }), {
         status: 404, headers: corsHeaders,
       });
     }

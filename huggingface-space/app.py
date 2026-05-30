@@ -281,6 +281,16 @@ Return ONLY valid JSON."""
     except Exception as e: raise HTTPException(500, str(e))
 
 # ── VegaMovies & Consumet Scrapers ────────────────────────────────────────────
+
+# Domain rotation list — tried in order until one succeeds (mirrors CF Worker)
+VEGA_DOMAINS = [
+    'vegamovies.diamonds',
+    'vegamovies.nl',
+    'vegamovies.day',
+    'vegamovies.channel',
+    'vegamovies.club',
+]
+
 ANINEKO_HEADERS = {
     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
     'Referer': 'https://anineko.to/'
@@ -289,28 +299,39 @@ ANINEKO_HEADERS = {
 def clean_anime_title(title: str) -> str:
     return html.unescape(title).strip()
 
+def _try_vega_search(query: str, headers: dict) -> Optional[requests.Response]:
+    """Try each VegaMovies domain until one succeeds for search."""
+    for domain in VEGA_DOMAINS:
+        try:
+            url = f"https://{domain}/index.php?do=search"
+            data = {"do": "search", "subaction": "search", "story": query}
+            headers_copy = dict(headers)
+            headers_copy["Referer"] = f"https://{domain}/"
+            r = requests.post(url, data=data, headers=headers_copy, timeout=10)
+            if r.status_code == 200 and ('article' in r.text or 'post-item' in r.text):
+                logger.info(f"VegaMovies search succeeded on {domain}")
+                return r, domain
+        except Exception:
+            continue
+    return None, None
+
 @app.get("/vegamovies/search")
 async def vegamovies_search(q: str, year: Optional[int] = None, quality: Optional[str] = None):
-    url = "https://vegamovies.diamonds/index.php?do=search"
-    data = {
-        "do": "search",
-        "subaction": "search",
-        "story": q
-    }
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Referer": "https://vegamovies.diamonds/"
     }
     try:
-        r = requests.post(url, data=data, headers=headers, timeout=10)
-        if r.status_code != 200:
-            return {"results": []}
+        r, domain = _try_vega_search(q, headers)
+        if r is None or domain is None:
+            return {"results": [], "error": "All VegaMovies domains unreachable"}
         
         html_content = r.text
-        articles = re.findall(r'<article class="post-item site__col">[\s\S]*?</article>', html_content)
+        # Match articles with a flexible regex (domain-agnostic)
+        articles = re.findall(r'<article[^>]*class="[^"]*post-item[^"]*"[^>]*>[\s\S]*?</article>', html_content)
         results = []
         for art in articles:
-            url_m = re.search(r'href="(https://vegamovies\.diamonds/\d+-[^"]+\.html)"', art)
+            # Domain-agnostic URL match
+            url_m = re.search(r'href="(https://vegamovies\.[^"/]+/\d+-[^"]+\.html)"', art)
             title_m = re.search(r'title="([^"]+)"', art)
             img_m = re.search(r'src="([^"]+)"', art)
             
@@ -319,7 +340,7 @@ async def vegamovies_search(q: str, year: Optional[int] = None, quality: Optiona
                 title = html.unescape(title_m.group(1))
                 poster = img_m.group(1) if img_m else None
                 if poster and poster.startswith('/'):
-                    poster = 'https://vegamovies.diamonds' + poster
+                    poster = f'https://{domain}' + poster
                 
                 year_m = re.search(r'\((\d{4})\)', title)
                 item_year = year_m.group(1) if year_m else None
@@ -343,7 +364,7 @@ async def vegamovies_search(q: str, year: Optional[int] = None, quality: Optiona
                     "quality": item_quality,
                     "language": language
                 })
-        return {"results": results}
+        return {"results": results, "domain": domain}
     except Exception as e:
         logger.error(f"VegaMovies search error: {e}")
         return {"results": []}
